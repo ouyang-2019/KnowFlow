@@ -1,13 +1,16 @@
+import message from '@/components/ui/message';
 import { LanguageTranslationMap } from '@/constants/common';
 import { ResponseGetType } from '@/interfaces/database/base';
 import { IToken } from '@/interfaces/database/chat';
 import { ITenantInfo } from '@/interfaces/database/knowledge';
+import { ILangfuseConfig } from '@/interfaces/database/system';
 import {
   ISystemStatus,
   ITenant,
   ITenantUser,
   IUserInfo,
 } from '@/interfaces/database/user-setting';
+import { ISetLangfuseConfigRequestBody } from '@/interfaces/request/system';
 import userService, {
   addTenantUser,
   agreeTenant,
@@ -16,7 +19,7 @@ import userService, {
   listTenantUser,
 } from '@/services/user-service';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Modal, message } from 'antd';
+import { Modal } from 'antd';
 import DOMPurify from 'dompurify';
 import { isEmpty } from 'lodash';
 import { useCallback, useMemo, useState } from 'react';
@@ -40,6 +43,43 @@ export const useFetchUserInfo = (): ResponseGetType<IUserInfo> => {
           // 默认定死中文
           LanguageTranslationMap['Chinese'],
         );
+
+        // 检查用户是否具有管理员权限（包含 RBAC 权限）
+        const userInfo = data.data;
+        userInfo.is_admin = false;
+
+        // 1. 检查 is_superuser 字段
+        if (userInfo.is_superuser) {
+          userInfo.is_admin = true;
+        } else {
+          // 2. 检查 RBAC 系统中的全局管理员权限
+          try {
+            const response = await fetch(
+              '/api/knowflow/v1/rbac/permissions/check-global',
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  user_id: userInfo.id,
+                  permission_type: 'admin',
+                }),
+              },
+            );
+
+            if (response.ok) {
+              const rbacResult = await response.json();
+              if (rbacResult.has_permission) {
+                userInfo.is_admin = true;
+              }
+            }
+          } catch (error) {
+            console.warn('Failed to check RBAC admin permission:', error);
+          }
+        }
+
+        return userInfo;
       }
       return data?.data ?? {};
     },
@@ -376,4 +416,58 @@ export const useAgreeTenant = () => {
   });
 
   return { data, loading, agreeTenant: mutateAsync };
+};
+
+export const useSetLangfuseConfig = () => {
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: ['setLangfuseConfig'],
+    mutationFn: async (params: ISetLangfuseConfigRequestBody) => {
+      const { data } = await userService.setLangfuseConfig(params);
+      if (data.code === 0) {
+        message.success(t('message.operated'));
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, setLangfuseConfig: mutateAsync };
+};
+
+export const useDeleteLangfuseConfig = () => {
+  const { t } = useTranslation();
+  const {
+    data,
+    isPending: loading,
+    mutateAsync,
+  } = useMutation({
+    mutationKey: ['deleteLangfuseConfig'],
+    mutationFn: async () => {
+      const { data } = await userService.deleteLangfuseConfig();
+      if (data.code === 0) {
+        message.success(t('message.deleted'));
+      }
+      return data?.code;
+    },
+  });
+
+  return { data, loading, deleteLangfuseConfig: mutateAsync };
+};
+
+export const useFetchLangfuseConfig = () => {
+  const { data, isFetching: loading } = useQuery<ILangfuseConfig>({
+    queryKey: ['fetchLangfuseConfig'],
+    gcTime: 0,
+    queryFn: async () => {
+      const { data } = await userService.getLangfuseConfig();
+
+      return data?.data;
+    },
+  });
+
+  return { data, loading };
 };

@@ -18,18 +18,25 @@ from flask import request
 from flask_login import login_required, current_user
 
 from api import settings
+from api.apps import smtp_mail_server
 from api.db import UserTenantRole, StatusEnum
 from api.db.db_models import UserTenant
 from api.db.services.user_service import UserTenantService, UserService
 
 from api.utils import get_uuid, delta_seconds
 from api.utils.api_utils import get_json_result, validate_request, server_error_response, get_data_error_result
+from api.utils.web_utils import send_invite_email
+from api.utils.rbac_utils import check_global_permission
 
 
 @manager.route("/<tenant_id>/user/list", methods=["GET"])  # noqa: F821
 @login_required
 def user_list(tenant_id):
-    if current_user.id != tenant_id:
+    # 检查权限：租户拥有者或具有全局团队管理权限
+    is_tenant_owner = current_user.id == tenant_id
+    has_global_admin = check_global_permission(current_user.id, "admin", "default")
+    
+    if not is_tenant_owner and not has_global_admin:
         return get_json_result(
             data=False,
             message='No authorization.',
@@ -48,7 +55,11 @@ def user_list(tenant_id):
 @login_required
 @validate_request("email")
 def create(tenant_id):
-    if current_user.id != tenant_id:
+    # 检查权限：租户拥有者或具有全局团队管理权限
+    is_tenant_owner = current_user.id == tenant_id
+    has_global_admin = check_global_permission(current_user.id, "admin", "default")
+    
+    if not is_tenant_owner and not has_global_admin:
         return get_json_result(
             data=False,
             message='No authorization.',
@@ -61,7 +72,7 @@ def create(tenant_id):
         return get_data_error_result(message="User not found.")
 
     user_id_to_invite = invite_users[0].id
-    user_tenants = UserTenantService.query(user_id=user_id_to_invite, tenant_id=tenant_id)
+    user_tenants = UserTenantService.query(user_id=user_id_to_invite, tenant_id=tenant_id, status=StatusEnum.VALID.value)
     if user_tenants:
         user_tenant_role = user_tenants[0].role
         if user_tenant_role == UserTenantRole.NORMAL:
@@ -78,6 +89,20 @@ def create(tenant_id):
         role=UserTenantRole.INVITE,
         status=StatusEnum.VALID.value)
 
+    if smtp_mail_server and settings.SMTP_CONF:
+        from threading import Thread
+
+        user_name = ""
+        _, user = UserService.get_by_id(current_user.id)
+        if user:
+            user_name = user.nickname
+
+        Thread(
+            target=send_invite_email,
+            args=(invite_user_email, settings.MAIL_FRONTEND_URL, tenant_id, user_name or current_user.email),
+            daemon=True
+        ).start()
+
     usr = invite_users[0].to_dict()
     usr = {k: v for k, v in usr.items() if k in ["id", "avatar", "email", "nickname"]}
 
@@ -87,7 +112,12 @@ def create(tenant_id):
 @manager.route('/<tenant_id>/user/<user_id>', methods=['DELETE'])  # noqa: F821
 @login_required
 def rm(tenant_id, user_id):
-    if current_user.id != tenant_id and current_user.id != user_id:
+    # 检查权限：租户拥有者、用户自己或具有全局团队管理权限
+    is_tenant_owner = current_user.id == tenant_id
+    is_self_removal = current_user.id == user_id
+    has_global_admin = check_global_permission(current_user.id, "admin", "default")
+    
+    if not is_tenant_owner and not is_self_removal and not has_global_admin:
         return get_json_result(
             data=False,
             message='No authorization.',

@@ -1,6 +1,5 @@
 include:
   - ./docker-compose-base.yml
-
 # To ensure that the container processes the locally modified `service_conf.yaml.template` instead of the one included in its image, you need to mount the local `service_conf.yaml.template` to the container.
 services:
   ragflow:
@@ -16,7 +15,13 @@ services:
     #   - --mcp-base-url=http://127.0.0.1:9380
     #   - --mcp-script-path=/ragflow/mcp/server/server.py
     #   - --mcp-mode=self-host
-    #   - --mcp-host-api-key=ragflow-xxxxxxx
+    #   - --mcp-host-api-key=ragflow-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    # Optional transport flags for MCP (customize if needed).
+    # Host mode need to combined with --no-transport-streamable-http-enabled flag, namely, host+streamable-http is not supported yet.
+    # The following are enabled by default unless explicitly disabled with --no-<flag>.
+    #   - --no-transport-sse-enabled # Disable legacy SSE endpoints (/sse and /messages/)
+    #   - --no-transport-streamable-http-enabled #  Disable Streamable HTTP transport (/mcp endpoint)
+    #   - --no-json-response # Disable JSON response mode in Streamable HTTP transport (instead of SSE over HTTP)
     container_name: ragflow-server
     ports:
       - ${SVR_HTTP_PORT}:9380
@@ -33,12 +38,13 @@ services:
       - ../history_data_agent:/ragflow/history_data_agent
       - ./service_conf.yaml.template:/ragflow/conf/service_conf.yaml.template
       - ./entrypoint.sh:/ragflow/entrypoint.sh
-
     env_file: .env
     environment:
       - TZ=${TIMEZONE}
       - HF_ENDPOINT=${HF_ENDPOINT}
       - MACOS=${MACOS}
+      - KNOWFLOW_API_URL=${KNOWFLOW_API_URL:-http://knowflow-backend:5000}
+      - GOTENBERG_URL=http://knowflow-gotenberg:3000
     networks:
       - ragflow
     restart: on-failure
@@ -71,21 +77,15 @@ services:
 
   knowflow-backend:
     container_name: knowflow-backend
-    image: zxwei/knowflow-server:v2.0.0
+    image: zxwei/knowflow-server:v2.1.8
     build:
       context: ../knowflow
       dockerfile: Dockerfile
       target: backend
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     ports:
       - "5000:5000"
     environment:
+      - FLASK_DEBUG=false
       - RAGFLOW_BASE_URL=${RAGFLOW_BASE_URL:-http://ragflow-server:9380}
       - DB_HOST=${DB_HOST:-mysql}
       - MYSQL_PORT=3306
@@ -102,14 +102,18 @@ services:
       - MANAGEMENT_JWT_SECRET=${MANAGEMENT_JWT_SECRET:-12345678}
       - TZ=${TIMEZONE:-UTC}
     volumes:
-      - ../knowflow/server/services/config:/app/services/config:ro
+      # KnowFlow Server 业务配置文件
+      - ./knowflow-server/settings.yaml:/app/services/config/settings.yaml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - ragflow
     restart: on-failure
     depends_on:
-      - knowflow-gotenberg
+      mysql:
+        condition: service_healthy
+      knowflow-gotenberg:
+        condition: service_started
 
   knowflow-gotenberg:
     container_name: knowflow-gotenberg

@@ -1,5 +1,6 @@
 import { DocumentParserType } from '@/constants/knowledge';
 import { useTranslate } from '@/hooks/common-hooks';
+import { useSelectParserList } from '@/hooks/user-setting-hooks';
 import { normFile } from '@/utils/file-util';
 import { PlusOutlined } from '@ant-design/icons';
 import { Button, Form, Input, Radio, Select, Space, Upload } from 'antd';
@@ -15,16 +16,19 @@ import { EmailConfiguration } from './email';
 import { KnowledgeGraphConfiguration } from './knowledge-graph';
 import { LawsConfiguration } from './laws';
 import { ManualConfiguration } from './manual';
-import { MinerUConfiguration } from './mineru';
 import { NaiveConfiguration } from './naive';
 import { OneConfiguration } from './one';
 import { PaperConfiguration } from './paper';
+import { ParentChildConfiguration } from './parent_child';
 import { PictureConfiguration } from './picture';
 import { PresentationConfiguration } from './presentation';
 import { QAConfiguration } from './qa';
+import { RegexConfiguration } from './regex';
 import { ResumeConfiguration } from './resume';
+import { SmartConfiguration } from './smart';
 import { TableConfiguration } from './table';
 import { TagConfiguration } from './tag';
+import { TitleConfiguration } from './title';
 
 import styles from '../index.less';
 
@@ -46,7 +50,10 @@ const ConfigurationComponentMap = {
   [DocumentParserType.Email]: EmailConfiguration,
   [DocumentParserType.Tag]: TagConfiguration,
   [DocumentParserType.KnowledgeGraph]: KnowledgeGraphConfiguration,
-  [DocumentParserType.MinerU]: MinerUConfiguration,
+  [DocumentParserType.Smart]: SmartConfiguration,
+  [DocumentParserType.Regex]: RegexConfiguration,
+  [DocumentParserType.ParentChild]: ParentChildConfiguration,
+  [DocumentParserType.Title]: TitleConfiguration,
 };
 
 function EmptyComponent() {
@@ -57,6 +64,7 @@ export const ConfigurationForm = ({ form }: { form: FormInstance }) => {
   const { submitKnowledgeConfiguration, submitLoading, navigateToDataset } =
     useSubmitKnowledgeConfiguration(form);
   const { t } = useTranslate('knowledgeConfiguration');
+  const parserList = useSelectParserList();
 
   const [finalParserId, setFinalParserId] = useState<DocumentParserType>();
   const knowledgeDetails = useFetchKnowledgeConfigurationOnMount(form);
@@ -73,7 +81,12 @@ export const ConfigurationForm = ({ form }: { form: FormInstance }) => {
 
   useEffect(() => {
     setFinalParserId(knowledgeDetails.parser_id as DocumentParserType);
-  }, [knowledgeDetails.parser_id]);
+    // 如果没有设置parser_id，设置默认值
+    if (!knowledgeDetails.parser_id && parserList.length > 0) {
+      form.setFieldsValue({ parser_id: parserList[0].value });
+      setFinalParserId(parserList[0].value as DocumentParserType);
+    }
+  }, [knowledgeDetails.parser_id, parserList, form]);
 
   return (
     <Form form={form} name="validateOnly" layout="vertical" autoComplete="off">

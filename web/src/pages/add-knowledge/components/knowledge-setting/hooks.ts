@@ -11,6 +11,7 @@ import {
   getBase64FromUploadFileList,
   getUploadFileListFromBase64,
 } from '@/utils/file-util';
+import { filterParsersByLayoutRecognize } from '@/utils/parser-filter';
 import { useIsFetching } from '@tanstack/react-query';
 import { Form, UploadFile } from 'antd';
 import { FormInstance } from 'antd/lib';
@@ -24,9 +25,19 @@ export const useSubmitKnowledgeConfiguration = (form: FormInstance) => {
   const submitKnowledgeConfiguration = useCallback(async () => {
     const values = await form.validateFields();
     const avatar = await getBase64FromUploadFileList(values.avatar);
+
+    // 将 chunking_config 合并到 parser_config 中
+    const { chunking_config, parser_config, ...restValues } = values;
+    const mergedParserConfig = {
+      ...parser_config,
+      ...(chunking_config ? { chunking_config } : {}),
+    };
+
     saveKnowledgeConfiguration({
-      ...values,
+      ...restValues,
       avatar,
+      parser_config: mergedParserConfig,
+      parser_id: values.parser_id, // 确保包含 parser_id
     });
     navigateToDataset();
   }, [saveKnowledgeConfiguration, form, navigateToDataset]);
@@ -41,10 +52,18 @@ export const useSubmitKnowledgeConfiguration = (form: FormInstance) => {
 // The value that does not need to be displayed in the analysis method Select
 const HiddenFields = ['email', 'picture', 'audio'];
 
-export function useSelectChunkMethodList() {
+export function useSelectChunkMethodList(layoutRecognize?: string) {
   const parserList = useSelectParserList();
 
-  return parserList.filter((x) => !HiddenFields.some((y) => y === x.value));
+  return parserList.filter((x) => {
+    // Filter out hidden fields
+    if (HiddenFields.some((y) => y === x.value)) {
+      return false;
+    }
+
+    // Filter by layout_recognize
+    return filterParsersByLayoutRecognize(x.value as string, layoutRecognize);
+  });
 }
 
 export function useSelectEmbeddingModelOptions() {
@@ -64,6 +83,11 @@ export const useFetchKnowledgeConfigurationOnMount = (form: FormInstance) => {
     const fileList: UploadFile[] = getUploadFileListFromBase64(
       knowledgeDetails.avatar,
     );
+
+    // 从 parser_config 中提取 chunking_config
+    const { chunking_config, ...restParserConfig } =
+      knowledgeDetails.parser_config || {};
+
     form.setFieldsValue({
       ...pick(knowledgeDetails, [
         'description',
@@ -72,9 +96,10 @@ export const useFetchKnowledgeConfigurationOnMount = (form: FormInstance) => {
         'embd_id',
         'parser_id',
         'language',
-        'parser_config',
         'pagerank',
       ]),
+      parser_config: restParserConfig,
+      chunking_config: chunking_config,
       avatar: fileList,
     });
   }, [form, knowledgeDetails]);
@@ -88,10 +113,6 @@ export const useSelectKnowledgeDetailsLoading = () =>
 export const useHandleChunkMethodChange = () => {
   const [form] = Form.useForm();
   const chunkMethod = Form.useWatch('parser_id', form);
-
-  useEffect(() => {
-    console.log('🚀 ~ useHandleChunkMethodChange ~ chunkMethod:', chunkMethod);
-  }, [chunkMethod]);
 
   return { form, chunkMethod };
 };

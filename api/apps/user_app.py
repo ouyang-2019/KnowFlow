@@ -16,6 +16,7 @@
 import json
 import logging
 import re
+import secrets
 from datetime import datetime
 
 from flask import redirect, request, session
@@ -27,7 +28,8 @@ from api.apps.auth import get_auth_client
 from api.db import FileType, UserTenantRole
 from api.db.db_models import TenantLLM
 from api.db.services.file_service import FileService
-from api.db.services.llm_service import LLMService, TenantLLMService
+from api.db.services.llm_service import get_init_tenant_llm
+from api.db.services.tenant_llm_service import TenantLLMService
 from api.db.services.user_service import TenantService, UserService, UserTenantService
 from api.utils import (
     current_timestamp,
@@ -465,7 +467,7 @@ def log_out():
         schema:
           type: object
     """
-    current_user.access_token = ""
+    current_user.access_token = f"INVALID_{secrets.token_hex(16)}"
     current_user.save()
     logout_user()
     return get_json_result(data=True)
@@ -565,7 +567,41 @@ def user_profile():
               type: string
               description: User email.
     """
-    return get_json_result(data=current_user.to_dict())
+    user_data = current_user.to_dict()
+    
+    # 检查是否为管理员 - 包括数据库 is_superuser 字段和 RBAC 权限
+    user_data['is_admin'] = False
+    
+    # 1. 检查数据库中的 is_superuser 字段
+    if current_user.is_superuser:
+        user_data['is_admin'] = True
+    else:
+        # 2. 通过 HTTP API 检查 RBAC 系统中的管理员权限
+        try:
+            import requests
+            from api.utils.rbac_utils import KNOWFLOW_API_URL
+
+            # 调用 KnowFlow 后端的 RBAC API 检查全局管理员权限
+            response = requests.post(
+                f'{KNOWFLOW_API_URL}/api/v1/rbac/permissions/check-global',
+                json={
+                    'user_id': current_user.id,
+                    'permission_type': 'admin'
+                },
+                timeout=3  # 3秒超时
+            )
+            
+            if response.ok:
+                rbac_result = response.json()
+                if rbac_result.get('has_permission', False):
+                    user_data['is_admin'] = True
+                    
+        except Exception as e:
+            logging.warning(f"Failed to check RBAC permissions for user {current_user.id}: {e}")
+            # 如果 RBAC 检查失败，只依赖 is_superuser 字段
+            pass
+    
+    return get_json_result(data=user_data)
 
 
 def rollback_user_registration(user_id):
@@ -618,33 +654,8 @@ def user_register(user_id, user):
         "size": 0,
         "location": "",
     }
-    tenant_llm = []
-    for llm in LLMService.query(fid=settings.LLM_FACTORY):
-        tenant_llm.append(
-            {
-                "tenant_id": user_id,
-                "llm_factory": settings.LLM_FACTORY,
-                "llm_name": llm.llm_name,
-                "model_type": llm.model_type,
-                "api_key": settings.API_KEY,
-                "api_base": settings.LLM_BASE_URL,
-                "max_tokens": llm.max_tokens if llm.max_tokens else 8192,
-            }
-        )
-    if settings.LIGHTEN != 1:
-        for buildin_embedding_model in settings.BUILTIN_EMBEDDING_MODELS:
-            mdlnm, fid = TenantLLMService.split_model_name_and_factory(buildin_embedding_model)
-            tenant_llm.append(
-                {
-                    "tenant_id": user_id,
-                    "llm_factory": fid,
-                    "llm_name": mdlnm,
-                    "model_type": "embedding",
-                    "api_key": "",
-                    "api_base": "",
-                    "max_tokens": 1024 if buildin_embedding_model == "BAAI/bge-large-zh-v1.5@BAAI" else 512,
-                }
-            )
+
+    tenant_llm = get_init_tenant_llm(user_id)
 
     if not UserService.save(**user):
         return

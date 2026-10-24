@@ -1,5 +1,5 @@
 import { translationTable } from '@/locales/config';
-import TranslationTable from './TranslationTable';
+import TranslationTable from './translation-table';
 
 function UserSettingLocale() {
   return (
@@ -7,12 +7,14 @@ function UserSettingLocale() {
       data={translationTable}
       languages={[
         'English',
+        'Rus',
         'Vietnamese',
         'Spanish',
         'zh',
         'zh-TRADITIONAL',
         'ja',
         'pt-br',
+        'German',
       ]}
     />
   );

@@ -20,6 +20,8 @@ const {
   create_chunk,
   set_chunk,
   get_chunk,
+  get_parent,
+  set_parent,
   switch_chunk,
   rm_chunk,
   retrieval_test,
@@ -32,9 +34,8 @@ const {
   upload_and_parse,
   listTagByKnowledgeIds,
   setMeta,
-  knowflow_document_parse,
-  knowflow_parse_progress,
-  knowflow_parse_cancel,
+  getMeta,
+  retrievalTestShare,
 } = api;
 
 const methods = {
@@ -125,6 +126,14 @@ const methods = {
     url: get_chunk,
     method: 'get',
   },
+  get_parent: {
+    url: get_parent,
+    method: 'get',
+  },
+  set_parent: {
+    url: set_parent,
+    method: 'post',
+  },
   switch_chunk: {
     url: switch_chunk,
     method: 'post',
@@ -153,17 +162,12 @@ const methods = {
     url: listTagByKnowledgeIds,
     method: 'get',
   },
-  // knowflow mineru parser
-  knowflow_document_parse: {
-    url: knowflow_document_parse,
-    method: 'post',
-  },
-  knowflow_parse_progress: {
-    url: knowflow_parse_progress,
+  getMeta: {
+    url: getMeta,
     method: 'get',
   },
-  knowflow_parse_cancel: {
-    url: knowflow_parse_cancel,
+  retrievalTestShare: {
+    url: retrievalTestShare,
     method: 'post',
   },
 };
@@ -180,6 +184,10 @@ export const renameTag = (
   knowledgeId: string,
   { fromTag, toTag }: IRenameTag,
 ) => post(api.renameTag(knowledgeId), { fromTag, toTag });
+
+export function deleteKnowledgeGraph(knowledgeId: string) {
+  return request.delete(api.getKnowledgeGraph(knowledgeId));
+}
 
 export function getKnowledgeGraph(knowledgeId: string) {
   return request.get(api.getKnowledgeGraph(knowledgeId));

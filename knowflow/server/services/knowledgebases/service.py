@@ -1,4 +1,5 @@
 import json
+import logging
 import threading
 import time
 import traceback
@@ -9,12 +10,24 @@ import requests
 from database import DB_CONFIG, get_es_client
 from utils import generate_uuid
 
+logger = logging.getLogger(__name__)
+
 # 解析相关模块
-from .document_parser import _update_document_progress, perform_parse
+# 注意：document_parser 中的 perform_parse 等函数已废弃
+# 现在使用 RAGFlow 统一 API (document_run) 进行文档解析
 
 # 用于存储进行中的顺序批量任务状态
 # 结构: { kb_id: {"status": "running/completed/failed", "total": N, "current": M, "message": "...", "start_time": timestamp} }
 SEQUENTIAL_BATCH_TASKS = {}
+
+# 旧函数占位符（已废弃，仅为兼容性保留）
+def _update_document_progress(doc_id, **kwargs):
+    """已废弃：请使用 RAGFlow 的 document_run API"""
+    pass
+
+def perform_parse(doc_id, doc_info, file_info):
+    """已废弃：请使用 parse_document_unified"""
+    return {"success": False, "error": "此方法已废弃"}
 
 
 class KnowledgebaseService:
@@ -24,7 +37,7 @@ class KnowledgebaseService:
         return mysql.connector.connect(**DB_CONFIG)
 
     @classmethod
-    def get_knowledgebase_list(cls, page=1, size=10, name="", sort_by="create_time", sort_order="desc"):
+    def get_knowledgebase_list(cls, page=1, size=10, name="", sort_by="create_time", sort_order="desc", current_user_id=None, user_role=None):
         """获取知识库列表"""
         conn = cls._get_db_connection()
         cursor = conn.cursor(dictionary=True)
@@ -46,14 +59,35 @@ class KnowledgebaseService:
                 k.update_date,
                 k.doc_num,
                 k.language,
-                k.permission
+                k.permission,
+                k.parser_id,
+                k.created_by
             FROM knowledgebase k
         """
+        
+        # 构建WHERE子句和参数
+        where_clauses = []
         params = []
 
         if name:
-            query += " WHERE k.name LIKE %s"
+            where_clauses.append("k.name LIKE %s")
             params.append(f"%{name}%")
+        
+        # 添加基于角色的权限过滤
+        if current_user_id and user_role:
+            if user_role == 'admin':
+                # 管理员只能看到自己创建的知识库
+                where_clauses.append("k.created_by = %s")
+                params.append(current_user_id)
+            elif user_role == 'user':
+                # 普通用户只能看到自己创建的或有权限访问的知识库
+                where_clauses.append("k.created_by = %s")
+                params.append(current_user_id)
+            # super_admin 不添加过滤条件，可以看到所有知识库
+        
+        # 组合WHERE子句
+        if where_clauses:
+            query += " WHERE " + " AND ".join(where_clauses)
 
         # 添加查询排序条件
         query += f" {sort_clause}"
@@ -80,17 +114,78 @@ class KnowledgebaseService:
                     except ValueError:
                         result["create_date"] = ""
 
-        # 获取总数
-        count_query = "SELECT COUNT(*) as total FROM knowledgebase"
+        # 获取总数（重新构建不包含分页参数的params）
+        count_params = []
         if name:
-            count_query += " WHERE name LIKE %s"
-        cursor.execute(count_query, params[:1] if name else [])
+            count_params.append(f"%{name}%")
+        if current_user_id and user_role:
+            if user_role in ['admin', 'user']:
+                count_params.append(current_user_id)
+        
+        count_query = "SELECT COUNT(*) as total FROM knowledgebase k"
+        if where_clauses:
+            count_query += " WHERE " + " AND ".join(where_clauses)
+        cursor.execute(count_query, count_params)
         total = cursor.fetchone()["total"]
 
         cursor.close()
         conn.close()
 
+        # 为每个知识库添加权限统计信息
+        for kb in results:
+            permission_stats = cls.get_knowledgebase_permission_stats(kb['id'])
+            kb['permission_stats'] = permission_stats
+
         return {"list": results, "total": total}
+
+    @classmethod
+    def get_knowledgebase_permission_stats(cls, kb_id):
+        """获取知识库的权限统计信息"""
+        conn = cls._get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        
+        try:
+            # 统计用户权限数量
+            user_count_query = """
+                SELECT COUNT(DISTINCT ur.user_id) as user_count
+                FROM rbac_user_roles ur
+                JOIN rbac_roles r ON ur.role_id = r.id
+                WHERE r.code IN ('admin', 'editor', 'viewer')
+                AND ur.resource_id = %s
+                AND ur.is_active = 1
+            """
+            cursor.execute(user_count_query, (kb_id,))
+            user_result = cursor.fetchone()
+            user_count = user_result['user_count'] if user_result else 0
+            
+            # 统计团队权限数量
+            team_count_query = """
+                SELECT COUNT(DISTINCT team_id) as team_count
+                FROM rbac_team_roles
+                WHERE role_code IN ('admin', 'editor', 'viewer')
+                AND resource_id = %s
+                AND is_active = 1
+            """
+            cursor.execute(team_count_query, (kb_id,))
+            team_result = cursor.fetchone()
+            team_count = team_result['team_count'] if team_result else 0
+            
+            return {
+                'user_count': user_count,
+                'team_count': team_count,
+                'total_count': user_count + team_count
+            }
+            
+        except Exception as e:
+            print(f"获取知识库权限统计失败: {e}")
+            return {
+                'user_count': 0,
+                'team_count': 0,
+                'total_count': 0
+            }
+        finally:
+            cursor.close()
+            conn.close()
 
     @classmethod
     def get_knowledgebase_detail(cls, kb_id):
@@ -196,32 +291,45 @@ class KnowledgebaseService:
             else:
                 print(f"使用传入的 creator_id 作为 tenant_id 和 created_by: {tenant_id}")
 
-            # --- 获取动态 embd_id ---
+            # --- 获取用户配置的向量模型（与RAGFlow前端保持一致）---
             dynamic_embd_id = None
             default_embd_id = "bge-m3"  # Fallback default
             try:
-                query_embedding_model = """
-                    SELECT llm_name
-                    FROM tenant_llm
-                    WHERE model_type = 'embedding' AND update_time IS NOT NULL AND tenant_id = %s
-                    ORDER BY update_time DESC
-                    LIMIT 1
+                # 直接从tenant表获取用户配置的向量模型（与RAGFlow前端api/apps/kb_app.py第75行保持一致）
+                query_tenant_embedding = """
+                    SELECT embd_id
+                    FROM tenant
+                    WHERE id = %s AND embd_id IS NOT NULL AND embd_id != ''
                 """
-                cursor.execute(query_embedding_model, (tenant_id,))
-                embedding_model = cursor.fetchone()
+                cursor.execute(query_tenant_embedding, (tenant_id,))
+                tenant_config = cursor.fetchone()
 
-                if embedding_model and embedding_model.get("llm_name"):
-                    dynamic_embd_id = embedding_model["llm_name"]
-                    # 对硅基流动平台进行特异性处理
-                    if dynamic_embd_id == "netease-youdao/bce-embedding-base_v1":
-                        dynamic_embd_id = "BAAI/bge-m3"
-                    print(f"动态获取到的 embedding 模型 ID: {dynamic_embd_id}")
+                if tenant_config and tenant_config.get("embd_id"):
+                    dynamic_embd_id = tenant_config["embd_id"]
+                    print(f"从租户配置获取到的向量模型 ID: {dynamic_embd_id}")
                 else:
-                    dynamic_embd_id = default_embd_id
-                    print(f"未在 tenant_llm 表中找到 embedding 模型, 使用默认值: {dynamic_embd_id}")
+                    # 如果用户未配置向量模型，尝试获取超级管理员的默认配置
+                    query_admin_tenant = """
+                        SELECT t.embd_id
+                        FROM tenant t
+                        JOIN user u ON t.id = u.id
+                        WHERE u.email = 'admin@gmail.com' 
+                        AND t.embd_id IS NOT NULL AND t.embd_id != ''
+                        ORDER BY u.create_time ASC
+                        LIMIT 1
+                    """
+                    cursor.execute(query_admin_tenant)
+                    admin_config = cursor.fetchone()
+                    
+                    if admin_config and admin_config.get("embd_id"):
+                        dynamic_embd_id = admin_config["embd_id"]
+                        print(f"从超级管理员配置获取到的向量模型 ID: {dynamic_embd_id}")
+                    else:
+                        dynamic_embd_id = default_embd_id
+                        print(f"未找到用户和管理员配置的向量模型，使用默认值: {dynamic_embd_id}")
             except Exception as e:
                 dynamic_embd_id = default_embd_id
-                print(f"查询 embedding 模型失败: {str(e)}，使用默认值: {dynamic_embd_id}")
+                print(f"查询向量模型配置失败: {str(e)}，使用默认值: {dynamic_embd_id}")
                 traceback.print_exc()  # Log the full traceback for debugging
 
             current_time = datetime.now()
@@ -282,7 +390,7 @@ class KnowledgebaseService:
                     0,  # chunk_num
                     0.7,  # similarity_threshold
                     0.3,  # vector_similarity_weight
-                    "naive",  # parser_id
+                    data.get("parser_id", "smart"),  # parser_id
                     default_parser_config,  # parser_config
                     0,  # pagerank
                     "1",  # status
@@ -595,11 +703,20 @@ class KnowledgebaseService:
                 create_time = int(current_datetime.timestamp() * 1000)  # 毫秒级时间戳
                 current_date = current_datetime.strftime("%Y-%m-%d %H:%M:%S")  # 格式化日期字符串
 
-                # 设置默认值
-                default_parser_id = "naive"
+                # 获取知识库的parser_id和parser_config，如果没有则使用默认值
+                kb_parser_id = kb.get("parser_id", "smart")  # 默认使用 smart 而不是 naive
+                kb_parser_config = kb.get("parser_config")
+                if isinstance(kb_parser_config, str):
+                    try:
+                        kb_parser_config = json.loads(kb_parser_config)
+                    except:
+                        kb_parser_config = None
+
+                # 默认配置：使用 smart 分块方法 + MinerU 解析器
                 default_parser_config = json.dumps(
-                    {
-                        "chunk_token_num": 512,
+                    kb_parser_config or {
+                        "chunk_token_num": 256,  # 默认 256 而不是 512
+                        "layout_recognize": "MinerU",  # 默认使用 MinerU 解析器
                         "delimiter": "\n!?;。；！？",
                         "auto_keywords": 0,
                         "auto_questions": 0,
@@ -617,16 +734,22 @@ class KnowledgebaseService:
                         thumbnail, kb_id, parser_id, parser_config, source_type,
                         type, created_by, name, location, size,
                         token_num, chunk_num, progress, progress_msg, process_begin_at,
-                        process_duation, meta_fields, run, status
+                        process_duration, meta_fields, run, status, suffix
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
                         %s, %s, %s, %s, %s,
-                        %s, %s, %s, %s
+                        %s, %s, %s, %s, %s
                     )
                 """
 
+                # 从文件名中提取扩展名作为suffix
+                import os
+                file_suffix = os.path.splitext(file_name)[1].lstrip('.').lower() if file_name else file_type.lower()
+                if not file_suffix:
+                    file_suffix = file_type.lower()
+                
                 doc_params = [
                     doc_id,
                     create_time,
@@ -635,7 +758,7 @@ class KnowledgebaseService:
                     current_date,  # ID和时间
                     None,
                     kb_id,
-                    default_parser_id,
+                    kb_parser_id,
                     default_parser_config,
                     default_source_type,  # thumbnail到source_type
                     file_type,
@@ -651,7 +774,8 @@ class KnowledgebaseService:
                     0.0,
                     None,
                     "0",
-                    "1",  # process_duation到status
+                    "1",  # process_duration到status
+                    file_suffix,  # suffix
                 ]
 
                 cursor.execute(doc_query, doc_params)
@@ -705,83 +829,120 @@ class KnowledgebaseService:
     def delete_document(cls, doc_id):
         """删除文档"""
         try:
-            conn = cls._get_db_connection()
-            cursor = conn.cursor(dictionary=True)
+          conn = cls._get_db_connection()
+          cursor = conn.cursor(dictionary=True)
 
-            # 先检查文档是否存在
-            # check_query = """
-            #     SELECT 
-            #         d.kb_id, 
-            #         kb.created_by AS tenant_id  -- 获取 tenant_id (knowledgebase的创建者)
-            #     FROM document d
-            #     JOIN knowledgebase kb ON d.kb_id = kb.id -- JOIN knowledgebase 表
-            #     WHERE d.id = %s
-            # """
-            check_query = """
-                SELECT 
-                    d.kb_id, 
-                    d.created_by AS tenant_id
-                FROM document d
-                WHERE d.id = %s
-            """
-            cursor.execute(check_query, (doc_id,))
-            doc_data = cursor.fetchone()
+          # 先检查文档是否存在
+          check_query = """
+              SELECT
+                  d.kb_id,
+                  d.created_by AS tenant_id
+              FROM document d
+              WHERE d.id = %s
+          """
+          cursor.execute(check_query, (doc_id,))
+          doc_data = cursor.fetchone()
 
-            if not doc_data:
-                print(f"[INFO] 文档 {doc_id} 在数据库中未找到。")
-                return False
+          if not doc_data:
+              print(f"[INFO] 文档 {doc_id} 在数据库中未找到。")
+              return False
 
-            kb_id = doc_data["kb_id"]
+          kb_id = doc_data["kb_id"]
+          tenant_id_for_cleanup = doc_data["tenant_id"]
 
-            # 删除文件到文档的映射
-            f2d_query = "DELETE FROM file2document WHERE document_id = %s"
-            cursor.execute(f2d_query, (doc_id,))
+          # 1. 删除任务表记录
+          task_query = "DELETE FROM task WHERE doc_id = %s"
+          cursor.execute(task_query, (doc_id,))
+          task_deleted = cursor.rowcount
+          print(f"[DB-SUCCESS] 删除了 {task_deleted} 个任务记录")
 
-            # 删除文档
-            doc_query = "DELETE FROM document WHERE id = %s"
-            cursor.execute(doc_query, (doc_id,))
+          # 2. 删除父子映射表记录
+          parent_child_query = "DELETE FROM parent_child_mapping WHERE doc_id = %s"
+          cursor.execute(parent_child_query, (doc_id,))
+          mapping_deleted = cursor.rowcount
+          print(f"[DB-SUCCESS] 删除了 {mapping_deleted} 个父子映射记录")
 
-            # 更新知识库文档数量
-            update_query = """
-                UPDATE knowledgebase 
-                SET doc_num = doc_num - 1,
-                    update_date = %s
-                WHERE id = %s
-            """
-            current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            cursor.execute(update_query, (current_date, kb_id))
+          # 3. 删除文件到文档的映射
+          f2d_query = "DELETE FROM file2document WHERE document_id = %s"
+          cursor.execute(f2d_query, (doc_id,))
+          f2d_deleted = cursor.rowcount
+          print(f"[DB-SUCCESS] 删除了 {f2d_deleted} 个文件映射记录")
 
-            conn.commit()
-            cursor.close()
-            conn.close()
+          # 4. 删除文档记录
+          doc_query = "DELETE FROM document WHERE id = %s"
+          cursor.execute(doc_query, (doc_id,))
+          print(f"[DB-SUCCESS] 删除了文档记录 {doc_id}")
 
-            es_client = get_es_client()
-            tenant_id_for_cleanup = doc_data["tenant_id"]
+          # 5. 更新知识库文档数量
+          update_query = """
+              UPDATE knowledgebase
+              SET doc_num = doc_num - 1,
+                  update_date = %s
+              WHERE id = %s
+          """
+          current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+          cursor.execute(update_query, (current_date, kb_id))
+          print(f"[DB-SUCCESS] 更新了知识库 {kb_id} 的文档计数")
 
-            # 删除 Elasticsearch 中的相关文档块
-            if es_client and tenant_id_for_cleanup:
-                es_index_name = f"ragflow_{tenant_id_for_cleanup}"
-                try:
-                    if es_client.indices.exists(index=es_index_name):
-                        query_body = {"query": {"term": {"doc_id": doc_id}}}
-                        resp = es_client.delete_by_query(
-                            index=es_index_name,
-                            body=query_body,
-                            refresh=True,  # 确保立即生效
-                            ignore_unavailable=True,  # 如果索引在此期间被删除
-                        )
-                        deleted_count = resp.get("deleted", 0)
-                        print(f"[ES-SUCCESS] 从索引 {es_index_name} 中删除 {deleted_count} 个与 doc_id {doc_id} 相关的块。")
-                    else:
-                        print(f"[ES-INFO] 索引 {es_index_name} 不存在，跳过 ES 清理 for doc_id {doc_id}。")
-                except Exception as es_err:
-                    print(f"[ES-ERROR] 清理 ES 块 for doc_id {doc_id} (index {es_index_name}) 失败: {str(es_err)}")
+          # 提交数据库事务
+          conn.commit()
+          cursor.close()
+          conn.close()
 
-            return True
+          # 6. 清理Elasticsearch中的数据
+          es_client = get_es_client()
+          if es_client and tenant_id_for_cleanup:
 
+              # 6.1 清理子分块索引
+              es_index_name = f"ragflow_{tenant_id_for_cleanup}"
+              try:
+                  if es_client.indices.exists(index=es_index_name):
+                      query_body = {"query": {"term": {"doc_id": doc_id}}}
+                      resp = es_client.delete_by_query(
+                          index=es_index_name,
+                          body=query_body,
+                          refresh=True,
+                          ignore_unavailable=True,
+                      )
+                      deleted_count = resp.get("deleted", 0)
+                      print(f"[ES-SUCCESS] 从子分块索引 {es_index_name} 中删除 {deleted_count} 个分块")
+                  else:
+                      print(f"[ES-INFO] 子分块索引 {es_index_name} 不存在，跳过清理")
+              except Exception as es_err:
+                  print(f"[ES-ERROR] 清理子分块索引失败: {str(es_err)}")
+
+              # 6.2 清理父分块索引
+              parent_index_name = f"ragflow_{tenant_id_for_cleanup}_parent"
+              try:
+                  if es_client.indices.exists(index=parent_index_name):
+                      query_body = {"query": {"term": {"doc_id": doc_id}}}
+                      resp = es_client.delete_by_query(
+                          index=parent_index_name,
+                          body=query_body,
+                          refresh=True,
+                          ignore_unavailable=True,
+                      )
+                      deleted_parent_count = resp.get("deleted", 0)
+                      print(f"[ES-SUCCESS] 从父分块索引 {parent_index_name} 中删除 {deleted_parent_count} 个父分块")
+                  else:
+                      print(f"[ES-INFO] 父分块索引 {parent_index_name} 不存在，跳过清理")
+              except Exception as es_err:
+                  print(f"[ES-ERROR] 清理父分块索引失败: {str(es_err)}")
+
+          print(f"[SUCCESS] 文档 {doc_id} 删除完成，所有相关数据已清理")
+          return True
+          
         except Exception as e:
-            print(f"[ERROR] 删除文档失败: {str(e)}")
-            raise Exception(f"删除文档失败: {str(e)}")
+          print(f"[ERROR] 删除文档失败: {str(e)}")
+          # 如果数据库操作已开始，尝试回滚
+          try:
+              if 'conn' in locals():
+                  conn.rollback()
+                  cursor.close()
+                  conn.close()
+          except:
+              pass
+          raise Exception(f"删除文档失败: {str(e)}")
 
     @classmethod
     def parse_document(cls, doc_id):
@@ -789,17 +950,121 @@ class KnowledgebaseService:
         conn = None
         cursor = None
         try:
+            # 检查是否为重新解析，如果是则先清理现有数据
+            conn = cls._get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+
+            # 检查文档是否已有分块数据
+            check_query = """
+                SELECT
+                    d.chunk_num,
+                    d.created_by AS tenant_id,
+                    d.name,
+                    d.progress
+                FROM document d
+                WHERE d.id = %s
+            """
+            cursor.execute(check_query, (doc_id,))
+            doc_data = cursor.fetchone()
+
+            if not doc_data:
+                raise Exception("文档不存在")
+
+            # 如果文档已有分块数据（chunk_num > 0），先清理
+            if doc_data["chunk_num"] > 0:
+                print(f"[REPARSE] 检测到文档已有 {doc_data['chunk_num']} 个分块，开始清理数据...")
+                
+                # 1. 重置文档的分块数量为 0
+                reset_query = """
+                    UPDATE document 
+                    SET chunk_num = 0,
+                        progress = 0.0,
+                        progress_msg = '清理现有数据中...'
+                    WHERE id = %s
+                """
+                cursor.execute(reset_query, (doc_id,))
+                print(f"[REPARSE] 已重置文档 {doc_id} 的分块数量为 0")
+
+                # 2. 删除任务表相关记录
+                task_query = "DELETE FROM task WHERE doc_id = %s"
+                cursor.execute(task_query, (doc_id,))
+                task_deleted = cursor.rowcount
+                print(f"[REPARSE] 删除了 {task_deleted} 个历史任务记录")
+
+                # 3. 删除父子映射表记录
+                parent_child_query = "DELETE FROM parent_child_mapping WHERE doc_id = %s"
+                cursor.execute(parent_child_query, (doc_id,))
+                mapping_deleted = cursor.rowcount
+                print(f"[REPARSE] 删除了 {mapping_deleted} 个父子映射记录")
+
+                # 提交数据库更改
+                conn.commit()
+                cursor.close()
+                conn.close()
+                conn = None
+
+                # 4. 清理Elasticsearch中的数据（参照 delete_document 的实现）
+                es_client = get_es_client()
+                if es_client and doc_data["tenant_id"]:
+                    tenant_id_for_cleanup = doc_data["tenant_id"]
+
+                    # 4.1 清理子分块索引
+                    es_index_name = f"ragflow_{tenant_id_for_cleanup}"
+                    try:
+                        if es_client.indices.exists(index=es_index_name):
+                            query_body = {"query": {"term": {"doc_id": doc_id}}}
+                            resp = es_client.delete_by_query(
+                                index=es_index_name,
+                                body=query_body,
+                                refresh=True,
+                                ignore_unavailable=True,
+                            )
+                            deleted_count = resp.get("deleted", 0)
+                            print(f"[REPARSE] 从子分块索引 {es_index_name} 中删除 {deleted_count} 个分块")
+                        else:
+                            print(f"[REPARSE] 子分块索引 {es_index_name} 不存在，跳过清理")
+                    except Exception as es_err:
+                        print(f"[REPARSE-ERROR] 清理子分块索引失败: {str(es_err)}")
+
+                    # 4.2 清理父分块索引
+                    parent_index_name = f"ragflow_{tenant_id_for_cleanup}_parent"
+                    try:
+                        if es_client.indices.exists(index=parent_index_name):
+                            query_body = {"query": {"term": {"doc_id": doc_id}}}
+                            resp = es_client.delete_by_query(
+                                index=parent_index_name,
+                                body=query_body,
+                                refresh=True,
+                                ignore_unavailable=True,
+                            )
+                            deleted_parent_count = resp.get("deleted", 0)
+                            print(f"[REPARSE] 从父分块索引 {parent_index_name} 中删除 {deleted_parent_count} 个父分块")
+                        else:
+                            print(f"[REPARSE] 父分块索引 {parent_index_name} 不存在，跳过清理")
+                    except Exception as es_err:
+                        print(f"[REPARSE-ERROR] 清理父分块索引失败: {str(es_err)}")
+
+                print(f"[REPARSE] 文档 {doc_data['name']} 的数据清理完成，开始重新解析...")
+
+                # 重新获取数据库连接
+                conn = cls._get_db_connection()
+                cursor = conn.cursor(dictionary=True)
+
             # 立即更新文档状态为"正在解析"，确保UI及时显示
             _update_document_progress(doc_id, run="1", progress=0.0, message="开始解析文档...")
             
             # 获取文档和文件信息
-            conn = cls._get_db_connection()
-            cursor = conn.cursor(dictionary=True)
+            if not conn:
+                conn = cls._get_db_connection()
+                cursor = conn.cursor(dictionary=True)
 
-            # 查询文档信息
+            # 查询文档信息和知识库的解析方法
             doc_query = """
-                SELECT d.id, d.name, d.location, d.type, d.kb_id, d.parser_id, d.parser_config, d.created_by
+                SELECT d.id, d.name, d.location, d.type, d.kb_id,
+                       COALESCE(d.parser_id, k.parser_id, 'smart') as parser_id,
+                       d.parser_config, d.created_by
                 FROM document d
+                JOIN knowledgebase k ON d.kb_id = k.id
                 WHERE d.id = %s
             """
             cursor.execute(doc_query, (doc_id,))
@@ -842,8 +1107,7 @@ class KnowledgebaseService:
             _update_document_progress(doc_id, run="1", progress=0.0, message="开始解析")
 
             # 调用后台解析函数
-            embedding_config = cls.get_system_embedding_config()
-            parse_result = perform_parse(doc_id, doc_info, file_info, embedding_config)
+            parse_result = perform_parse(doc_id, doc_info, file_info)
 
             # 返回解析结果
             return parse_result
@@ -897,7 +1161,7 @@ class KnowledgebaseService:
             cursor = conn.cursor(dictionary=True)
 
             query = """
-                SELECT progress, progress_msg, status, run
+                SELECT progress, progress_msg, status, run, chunk_num
                 FROM document
                 WHERE id = %s
             """
@@ -920,6 +1184,7 @@ class KnowledgebaseService:
                 "message": result.get("progress_msg", ""),
                 "status": result.get("status", "0"),
                 "running": result.get("run", "0"),
+                "chunk_num": result.get("chunk_num", 0),
             }
 
         except Exception as e:
@@ -961,7 +1226,7 @@ class KnowledgebaseService:
 
             # 更新文档状态为取消
             _update_document_progress(
-                doc_id, 
+                doc_id,
                 run="2",  # "2" 表示已取消
                 message="解析已被用户取消",
                 progress=result.get("progress", 0.0)
@@ -980,6 +1245,336 @@ class KnowledgebaseService:
                 cursor.close()
             if conn:
                 conn.close()
+
+    @classmethod
+    def update_document_parser_config(cls, doc_id, parser_id=None, layout_recognize=None, parser_config_updates=None):
+        """更新文档的解析配置（不触发解析）
+
+        Args:
+            doc_id: 文档 ID
+            parser_id: 分块方法（smart/title/regex/parent_child）
+            layout_recognize: PDF 解析器（DeepDOC/MinerU/DOTS）
+            parser_config_updates: 其他配置更新（如 chunk_token_num）
+
+        Returns:
+            dict: {"success": bool, "message": str}
+        """
+        conn = None
+        cursor = None
+
+        try:
+            conn = cls._get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+
+            # 查询文档现有配置
+            query = "SELECT parser_id, parser_config FROM document WHERE id = %s"
+            cursor.execute(query, (doc_id,))
+            doc = cursor.fetchone()
+
+            if not doc:
+                return {"success": False, "message": "文档不存在"}
+
+            # 准备更新的配置
+            import json
+            current_parser_config = doc.get('parser_config', {})
+            if isinstance(current_parser_config, str):
+                current_parser_config = json.loads(current_parser_config) if current_parser_config else {}
+
+            # 合并配置更新
+            updated_parser_config = current_parser_config.copy()
+
+            # 更新 layout_recognize
+            if layout_recognize:
+                updated_parser_config['layout_recognize'] = layout_recognize
+
+            # 更新其他配置
+            if parser_config_updates:
+                updated_parser_config.update(parser_config_updates)
+
+            # 更新 parser_id
+            final_parser_id = parser_id if parser_id else doc.get('parser_id', 'smart')
+
+            # 更新数据库
+            update_query = """
+                UPDATE document
+                SET parser_id = %s,
+                    parser_config = %s
+                WHERE id = %s
+            """
+            cursor.execute(update_query, (
+                final_parser_id,
+                json.dumps(updated_parser_config),
+                doc_id
+            ))
+            conn.commit()
+
+            return {
+                "success": True,
+                "message": "配置已更新",
+                "parser_id": final_parser_id,
+                "parser_config": updated_parser_config
+            }
+
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            return {"success": False, "message": f"更新配置失败: {str(e)}"}
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+    # --- 统一的文档解析方法（使用 RAGFlow API）---
+    @classmethod
+    def parse_document_unified(cls, doc_id, auth_token=None, parser_id=None, layout_recognize=None, parser_config_updates=None):
+        """统一的文档解析方法（调用 RAGFlow document_run API）
+
+        Args:
+            doc_id: 文档 ID
+            auth_token: JWT 认证 token（前端传来）
+            parser_id: 分块方法（smart/title/regex/parent_child），如果不提供则使用文档现有配置
+            layout_recognize: PDF 解析器（DeepDOC/MinerU/DOTS），如果不提供则使用文档现有配置
+            parser_config_updates: 其他配置更新（如 chunk_token_num）
+
+        Returns:
+            dict: {"success": bool, "message": str, "task_id": str}
+        """
+        conn = None
+        cursor = None
+
+        try:
+            conn = cls._get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+
+            # 1. 查询文档现有配置和状态
+            query = """
+                SELECT d.id, d.parser_id, d.parser_config, d.kb_id, d.name,
+                       d.chunk_num, d.created_by as tenant_id
+                FROM document d
+                WHERE d.id = %s
+            """
+            cursor.execute(query, (doc_id,))
+            doc = cursor.fetchone()
+
+            if not doc:
+                return {"success": False, "message": "文档不存在"}
+
+            # 1.5 如果文档已有分块数据，先清理
+            if doc.get('chunk_num', 0) > 0:
+                print(f"[DEBUG parse_unified] 检测到文档已有 {doc['chunk_num']} 个分块，开始清理数据...")
+
+                # 重置文档的分块数量和进度
+                reset_query = """
+                    UPDATE document
+                    SET chunk_num = 0,
+                        progress = 0.0,
+                        progress_msg = '准备重新解析...',
+                        run = '0'
+                    WHERE id = %s
+                """
+                cursor.execute(reset_query, (doc_id,))
+                print(f"[DEBUG parse_unified] 已重置文档 {doc_id} 的分块数量为 0")
+
+                # 删除任务表相关记录
+                task_query = "DELETE FROM task WHERE doc_id = %s"
+                cursor.execute(task_query, (doc_id,))
+                task_deleted = cursor.rowcount
+                print(f"[DEBUG parse_unified] 删除了 {task_deleted} 个历史任务记录")
+
+                # 删除父子映射表记录（如果存在）
+                try:
+                    parent_child_query = "DELETE FROM parent_child_mapping WHERE doc_id = %s"
+                    cursor.execute(parent_child_query, (doc_id,))
+                    mapping_deleted = cursor.rowcount
+                    print(f"[DEBUG parse_unified] 删除了 {mapping_deleted} 个父子映射记录")
+                except Exception as e:
+                    print(f"[DEBUG parse_unified] 清理父子映射表失败（可能不存在）: {e}")
+
+                conn.commit()
+
+                # 清理 Elasticsearch 中的数据
+                from database import get_es_client
+                es_client = get_es_client()
+                if es_client and doc.get('tenant_id'):
+                    tenant_id = doc['tenant_id']
+
+                    # 清理子分块索引
+                    es_index_name = f"ragflow_{tenant_id}"
+                    try:
+                        if es_client.indices.exists(index=es_index_name):
+                            query_body = {"query": {"term": {"doc_id": doc_id}}}
+                            resp = es_client.delete_by_query(
+                                index=es_index_name,
+                                body=query_body,
+                                refresh=True,
+                                ignore_unavailable=True,
+                            )
+                            deleted_count = resp.get("deleted", 0)
+                            print(f"[DEBUG parse_unified] 从子分块索引 {es_index_name} 中删除 {deleted_count} 个分块")
+                    except Exception as es_err:
+                        print(f"[DEBUG parse_unified] 清理子分块索引失败: {str(es_err)}")
+
+                    # 清理父分块索引
+                    parent_index_name = f"ragflow_{tenant_id}_parent"
+                    try:
+                        if es_client.indices.exists(index=parent_index_name):
+                            query_body = {"query": {"term": {"doc_id": doc_id}}}
+                            resp = es_client.delete_by_query(
+                                index=parent_index_name,
+                                body=query_body,
+                                refresh=True,
+                                ignore_unavailable=True,
+                            )
+                            deleted_parent_count = resp.get("deleted", 0)
+                            print(f"[DEBUG parse_unified] 从父分块索引 {parent_index_name} 中删除 {deleted_parent_count} 个父分块")
+                    except Exception as es_err:
+                        print(f"[DEBUG parse_unified] 清理父分块索引失败: {str(es_err)}")
+
+                print(f"[DEBUG parse_unified] 文档 {doc['name']} 的数据清理完成")
+
+            # 2. 准备更新的配置
+            import json
+            current_parser_config = doc.get('parser_config', {})
+            if isinstance(current_parser_config, str):
+                current_parser_config = json.loads(current_parser_config) if current_parser_config else {}
+
+            # 合并配置更新
+            updated_parser_config = current_parser_config.copy()
+
+            # 更新 layout_recognize
+            if layout_recognize:
+                updated_parser_config['layout_recognize'] = layout_recognize
+
+            # 更新其他配置
+            if parser_config_updates:
+                updated_parser_config.update(parser_config_updates)
+
+            # 更新 parser_id
+            final_parser_id = parser_id if parser_id else doc.get('parser_id', 'smart')
+
+            # 3. 更新数据库中的文档配置
+            update_query = """
+                UPDATE document
+                SET parser_id = %s,
+                    parser_config = %s
+                WHERE id = %s
+            """
+            cursor.execute(update_query, (
+                final_parser_id,
+                json.dumps(updated_parser_config),
+                doc_id
+            ))
+            conn.commit()
+
+            print(f"[DEBUG parse_unified] 更新文档配置 - doc_id={doc_id}, parser_id={final_parser_id}, parser_config={updated_parser_config}")
+
+            cursor.close()
+            conn.close()
+            conn = None
+
+            # 4. 调用 RAGFlow document_run API
+            from services.ragflow_client import get_ragflow_client
+            ragflow_client = get_ragflow_client()
+
+            result = ragflow_client.run_documents(
+                doc_ids=[doc_id],
+                run=1,  # 1 表示开始解析
+                auth_token=auth_token
+            )
+
+            if result.get('code') == 0:
+                return {
+                    "success": True,
+                    "message": "文档解析已启动",
+                    "task_id": doc_id
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": result.get('message', '启动解析失败')
+                }
+
+        except Exception as e:
+            print(f"[ERROR parse_unified] 解析文档失败 - doc_id={doc_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "success": False,
+                "message": f"解析失败: {str(e)}"
+            }
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+    @classmethod
+    def get_document_parse_progress_unified(cls, doc_id):
+        """获取文档解析进度（统一方法，从 RAGFlow task 表查询）
+
+        Args:
+            doc_id: 文档 ID
+
+        Returns:
+            dict: {"progress": float, "progress_msg": str, "run": str, "chunk_num": int}
+        """
+        from services.ragflow_client import get_ragflow_client
+
+        try:
+            ragflow_client = get_ragflow_client()
+            tasks = ragflow_client.get_tasks_status([doc_id])
+
+            if tasks and len(tasks) > 0:
+                task = tasks[0]
+
+                print(f"[PROGRESS] doc_id={doc_id}, run={task.get('run')}, task_chunk_num={task.get('chunk_num')}")
+
+                # 当 run='3' 时，从 document 表查询最终的 chunk_num
+                # 因为此时 chunk_ids 可能已被清空
+                if task.get('run') == '3':
+                    conn = cls._get_db_connection()
+                    cursor = conn.cursor(dictionary=True)
+
+                    query = """
+                        SELECT chunk_num
+                        FROM document
+                        WHERE id = %s
+                    """
+                    cursor.execute(query, (doc_id,))
+                    doc = cursor.fetchone()
+
+                    cursor.close()
+                    conn.close()
+
+                    if doc and doc['chunk_num'] > 0:
+                        print(f"[PROGRESS] doc_id={doc_id}, 从document表获取chunk_num: {doc['chunk_num']}")
+                        task['chunk_num'] = doc['chunk_num']
+                    else:
+                        print(f"[PROGRESS] doc_id={doc_id}, document.chunk_num为0，使用task的值: {task.get('chunk_num')}")
+
+                result = {
+                    "progress": task.get('progress', 0),
+                    "progress_msg": task.get('progress_msg', ''),
+                    "run": task.get('run', '0'),
+                    "chunk_num": task.get('chunk_num', 0)
+                }
+                print(f"[PROGRESS] doc_id={doc_id}, 返回结果: {result}")
+                return result
+            else:
+                # 没有找到任务记录，返回默认状态
+                return {
+                    "progress": 0,
+                    "progress_msg": "未找到解析任务",
+                    "run": "0",
+                    "chunk_num": 0
+                }
+
+        except Exception as e:
+            print(f"[ERROR get_progress] 获取解析进度失败 - doc_id={doc_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return {"error": f"获取进度失败: {str(e)}"}
 
     # --- 获取最早用户 ID ---
     @classmethod
@@ -1343,3 +1938,328 @@ class KnowledgebaseService:
                 cursor.close()
             if conn and conn.is_connected():
                 conn.close()
+
+    @classmethod
+    def get_knowledgebase_permissions(cls, kb_id):
+        """获取知识库权限列表（包含用户权限和团队权限）"""
+        try:
+            conn = cls._get_db_connection()
+            cursor = conn.cursor(dictionary=True)
+            
+            # 1. 获取用户权限
+            user_query = """
+            SELECT DISTINCT 
+                ur.user_id,
+                ur.resource_id as kb_id,
+                r.code as role_code,
+                CASE 
+                    WHEN r.code = 'admin' THEN 'admin'
+                    WHEN r.code = 'editor' THEN 'write' 
+                    WHEN r.code = 'viewer' THEN 'read'
+                    ELSE r.code
+                END as permission_level,
+                ur.granted_at,
+                'user' as permission_source
+            FROM rbac_user_roles ur
+            JOIN rbac_roles r ON ur.role_id = r.id  
+            WHERE ur.resource_id = %s 
+                AND ur.is_active = 1
+                AND r.code IN ('admin', 'editor', 'viewer')
+            """
+            
+            cursor.execute(user_query, (kb_id,))
+            user_permissions = cursor.fetchall()
+            
+            # 2. 获取团队权限
+            team_query = """
+            SELECT DISTINCT
+                tr.team_id,
+                tr.resource_id as kb_id,
+                tr.role_code,
+                CASE 
+                    WHEN tr.role_code = 'admin' THEN 'admin'
+                    WHEN tr.role_code = 'editor' THEN 'write'
+                    WHEN tr.role_code = 'viewer' THEN 'read'
+                    ELSE tr.role_code
+                END as permission_level,
+                tr.granted_at,
+                'team' as permission_source
+            FROM rbac_team_roles tr
+            WHERE tr.resource_id = %s 
+                AND tr.is_active = 1
+                AND tr.role_code IN ('admin', 'editor', 'viewer')
+            """
+            
+            cursor.execute(team_query, (kb_id,))
+            team_permissions = cursor.fetchall()
+            
+            # 3. 获取用户信息
+            user_permissions_with_info = []
+            if user_permissions:
+                user_ids = [perm['user_id'] for perm in user_permissions]
+                placeholders = ','.join(['%s'] * len(user_ids))
+                user_info_query = f"SELECT id, nickname FROM user WHERE id IN ({placeholders})"
+                cursor.execute(user_info_query, user_ids)
+                users_data = cursor.fetchall()
+                users_info = {user['id']: user['nickname'] for user in users_data}
+                
+                for perm in user_permissions:
+                    user_permissions_with_info.append({
+                        'user_id': perm['user_id'],
+                        'username': users_info.get(perm['user_id'], f"用户{perm['user_id'][:8]}"),
+                        'permission_level': perm['permission_level'],
+                        'granted_at': perm['granted_at'].isoformat() if perm['granted_at'] else None,
+                        'permission_source': 'user'
+                    })
+            
+            # 4. 获取团队信息
+            team_permissions_with_info = []
+            if team_permissions:
+                team_ids = [perm['team_id'] for perm in team_permissions]
+                placeholders = ','.join(['%s'] * len(team_ids))
+                team_info_query = f"SELECT id, name FROM tenant WHERE id IN ({placeholders})"
+                cursor.execute(team_info_query, team_ids)
+                teams_data = cursor.fetchall()
+                teams_info = {team['id']: team['name'] for team in teams_data}
+                
+                for perm in team_permissions:
+                    team_permissions_with_info.append({
+                        'team_id': perm['team_id'],
+                        'team_name': teams_info.get(perm['team_id'], f"团队{perm['team_id'][:8]}"),
+                        'permission_level': perm['permission_level'],
+                        'granted_at': perm['granted_at'].isoformat() if perm['granted_at'] else None,
+                        'permission_source': 'team'
+                    })
+            
+            return {
+                'total': len(user_permissions_with_info) + len(team_permissions_with_info),
+                'user_permissions': user_permissions_with_info,
+                'team_permissions': team_permissions_with_info,
+                'permissions': user_permissions_with_info + team_permissions_with_info  # 保持向后兼容
+            }
+            
+        except Exception as e:
+            print(f"获取知识库权限失败: {e}")
+            return {
+                'total': 0,
+                'user_permissions': [],
+                'team_permissions': [],
+                'permissions': []
+            }
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+    @classmethod
+    def grant_team_permission(cls, kb_id, team_id, permission_level, granted_by='system'):
+        """为团队授予知识库权限（使用团队角色系统）"""
+        try:
+            from services.rbac.permission_service import permission_service
+            from models.rbac_models import ResourceType
+            
+            # 权限级别映射到角色代码
+            role_mapping = {
+                'read': 'viewer',
+                'write': 'editor', 
+                'admin': 'admin'
+            }
+            
+            role_code = role_mapping.get(permission_level)
+            if not role_code:
+                raise ValueError(f"无效的权限级别: {permission_level}")
+            
+            # 使用团队角色系统授权
+            success = permission_service.grant_team_role(
+                team_id=team_id,
+                role_code=role_code,
+                resource_type=ResourceType.KNOWLEDGEBASE,
+                resource_id=kb_id,
+                tenant_id='default',  # 保持与权限检查时一致
+                granted_by=granted_by
+            )
+            
+            if success:
+                return {'success': True, 'message': f'团队权限授予成功: {permission_level}'}
+            else:
+                return {'success': False, 'message': '团队权限授予失败'}
+                
+        except Exception as e:
+            print(f"团队权限授予失败: {e}")
+            return {'success': False, 'message': f'团队权限授予失败: {str(e)}'}
+
+    @classmethod
+    def revoke_team_permission(cls, kb_id, team_id):
+        """撤销团队的知识库权限（使用团队角色系统）"""
+        try:
+            from services.rbac.permission_service import permission_service
+            from models.rbac_models import ResourceType
+            
+            # 撤销该团队在此知识库的所有角色
+            success = permission_service.revoke_team_role(
+                team_id=team_id,
+                resource_type=ResourceType.KNOWLEDGEBASE,
+                resource_id=kb_id,
+                tenant_id='default'
+            )
+            
+            if success:
+                return {'success': True, 'message': '团队权限撤销成功'}
+            else:
+                return {'success': False, 'message': '团队权限撤销失败或该团队无相关权限'}
+                
+        except Exception as e:
+            print(f"团队权限撤销失败: {e}")
+            return {'success': False, 'message': f'团队权限撤销失败: {str(e)}'}
+
+    @classmethod
+    def check_user_kb_permission(cls, user_id, kb_id, permission_level='read'):
+        """检查用户对知识库的权限"""
+        from services.rbac.permission_service import permission_service
+        from models.rbac_models import ResourceType, PermissionType
+        
+        # 映射权限级别到权限类型
+        permission_mapping = {
+            'read': PermissionType.READ,
+            'write': PermissionType.WRITE,
+            'admin': PermissionType.ADMIN,
+            'delete': PermissionType.DELETE
+        }
+        
+        permission_type = permission_mapping.get(permission_level, PermissionType.READ)
+        
+        # 执行权限检查
+        permission_check = permission_service.check_permission(
+            user_id=user_id,
+            resource_type=ResourceType.KNOWLEDGEBASE,
+            resource_id=kb_id,
+            permission_type=permission_type,
+            tenant_id='default'
+        )
+        
+        return permission_check.has_permission
+
+    # 批量解析状态管理（存储在内存中）
+    _batch_parse_status = {}
+
+    @classmethod
+    def start_batch_parse_sequential(cls, kb_id, auth_token=None):
+        """启动批量顺序解析（串行执行）"""
+        import threading
+        import time
+
+        # 检查是否已有批量解析在运行
+        if kb_id in cls._batch_parse_status:
+            status = cls._batch_parse_status[kb_id]
+            if status.get('status') == 'running':
+                return {
+                    "success": False,
+                    "message": "已有批量解析任务正在运行"
+                }
+
+        # 获取知识库中所有未完成解析的文档（run != '3' 为未完成）
+        conn = cls._get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        try:
+            # 查询所有 run != '3' 的文档（未完成解析）
+            query = """
+                SELECT id, name, run, progress
+                FROM document
+                WHERE kb_id = %s AND (run IS NULL OR run != '3')
+                ORDER BY create_time ASC
+            """
+            cursor.execute(query, (kb_id,))
+            documents = cursor.fetchall()
+
+            if not documents:
+                return {
+                    "success": False,
+                    "message": "没有需要解析的文档"
+                }
+
+            # 初始化批量解析状态
+            cls._batch_parse_status[kb_id] = {
+                'status': 'running',
+                'total': len(documents),
+                'current': 0,
+                'message': '准备开始批量解析...',
+                'start_time': time.time(),
+                'documents': documents
+            }
+
+            # 启动后台线程进行串行解析
+            def parse_worker():
+                for idx, doc in enumerate(documents):
+                    doc_id = doc['id']
+                    doc_name = doc['name']
+
+                    # 更新状态
+                    cls._batch_parse_status[kb_id]['current'] = idx + 1
+                    cls._batch_parse_status[kb_id]['message'] = f"正在解析: {doc_name} ({idx + 1}/{len(documents)})"
+
+                    # 调用单文档解析
+                    try:
+                        result = cls.parse_document_unified(
+                            doc_id,
+                            auth_token=auth_token
+                        )
+
+                        if not result.get("success"):
+                            continue
+
+                        # 等待文档解析完成（只以 run='3' 为完成条件）
+                        max_wait = 300  # 最多等待5分钟
+                        wait_time = 0
+                        while wait_time < max_wait:
+                            time.sleep(3)
+                            wait_time += 3
+
+                            progress_result = cls.get_document_parse_progress_unified(doc_id)
+                            if isinstance(progress_result, dict):
+                                run = progress_result.get('run', '0')
+
+                                # 检查是否完成（只以 run='3' 为准）
+                                if run == '3':
+                                    break
+
+                    except Exception as e:
+                        pass
+
+                # 全部完成
+                cls._batch_parse_status[kb_id]['status'] = 'completed'
+                cls._batch_parse_status[kb_id]['message'] = f"批量解析完成！共解析 {len(documents)} 个文档"
+
+            thread = threading.Thread(target=parse_worker, daemon=True)
+            thread.start()
+
+            return {
+                "success": True,
+                "message": f"批量解析已启动，共 {len(documents)} 个文档"
+            }
+
+        finally:
+            cursor.close()
+            conn.close()
+
+    @classmethod
+    def get_batch_parse_progress(cls, kb_id):
+        """获取批量解析进度"""
+        if kb_id not in cls._batch_parse_status:
+            return {
+                'status': 'idle',
+                'total': 0,
+                'current': 0,
+                'message': '无批量解析任务',
+                'start_time': None
+            }
+
+        status = cls._batch_parse_status[kb_id]
+        return {
+            'status': status.get('status', 'idle'),
+            'total': status.get('total', 0),
+            'current': status.get('current', 0),
+            'message': status.get('message', ''),
+            'start_time': status.get('start_time')
+        }

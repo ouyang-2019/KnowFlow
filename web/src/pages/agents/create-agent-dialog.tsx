@@ -1,3 +1,4 @@
+import { ButtonLoading } from '@/components/ui/button';
 import {
   Dialog,
   DialogContent,
@@ -5,17 +6,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { LoadingButton } from '@/components/ui/loading-button';
-import { IModalProps } from '@/interfaces/common';
 import { TagRenameId } from '@/pages/add-knowledge/constant';
 import { useTranslation } from 'react-i18next';
-import { CreateAgentForm } from './create-agent-form';
+import { CreateAgentForm, CreateAgentFormProps } from './create-agent-form';
+
+type CreateAgentDialogProps = CreateAgentFormProps;
 
 export function CreateAgentDialog({
   hideModal,
   onOk,
   loading,
-}: IModalProps<any>) {
+  shouldChooseAgent,
+}: CreateAgentDialogProps) {
   const { t } = useTranslation();
 
   return (
@@ -24,11 +26,15 @@ export function CreateAgentDialog({
         <DialogHeader>
           <DialogTitle>{t('flow.createGraph')}</DialogTitle>
         </DialogHeader>
-        <CreateAgentForm hideModal={hideModal} onOk={onOk}></CreateAgentForm>
+        <CreateAgentForm
+          hideModal={hideModal}
+          onOk={onOk}
+          shouldChooseAgent={shouldChooseAgent}
+        ></CreateAgentForm>
         <DialogFooter>
-          <LoadingButton type="submit" form={TagRenameId} loading={loading}>
+          <ButtonLoading type="submit" form={TagRenameId} loading={loading}>
             {t('common.save')}
-          </LoadingButton>
+          </ButtonLoading>
         </DialogFooter>
       </DialogContent>
     </Dialog>

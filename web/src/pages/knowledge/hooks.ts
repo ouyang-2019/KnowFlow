@@ -22,9 +22,10 @@ export const useSaveKnowledge = () => {
   const navigate = useNavigate();
 
   const onCreateOk = useCallback(
-    async (name: string) => {
+    async (name: string, parserMethod?: string) => {
       const ret = await createKnowledge({
         name,
+        parser_id: parserMethod || 'smart',
       });
 
       if (ret?.code === 0) {

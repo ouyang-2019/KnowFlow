@@ -1,8 +1,10 @@
+import message from '@/components/ui/message';
 import { Authorization } from '@/constants/authorization';
+import systemService from '@/services/system-service';
 import userService from '@/services/user-service';
 import authorizationUtil, { redirectToLogin } from '@/utils/authorization-util';
-import { useMutation } from '@tanstack/react-query';
-import { Form, message } from 'antd';
+import { useMutation, useQuery } from '@tanstack/react-query';
+import { Form } from 'antd';
 import { FormInstance } from 'antd/lib';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -17,8 +19,6 @@ export interface IRegisterRequestBody extends ILoginRequestBody {
 }
 
 export const useLogin = () => {
-  const { t } = useTranslation();
-
   const {
     data,
     isPending: loading,
@@ -29,7 +29,6 @@ export const useLogin = () => {
       const { data: res = {}, response } = await userService.login(params);
       if (res.code === 0) {
         const { data } = res;
-        message.success(t('message.logged'));
         const authorization = response.headers.get(Authorization);
         const token = data.access_token;
         const userInfo = {
@@ -111,4 +110,15 @@ export const useHandleSubmittable = (form: FormInstance) => {
   }, [form, values]);
 
   return { submittable };
+};
+
+export const useSystemConfig = () => {
+  return useQuery({
+    queryKey: ['systemConfig'],
+    queryFn: async () => {
+      const { data } = await systemService.getSystemConfig();
+      return data;
+    },
+    staleTime: 5 * 60 * 1000, // 5分钟缓存
+  });
 };

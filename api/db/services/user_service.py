@@ -15,6 +15,7 @@
 #
 import hashlib
 from datetime import datetime
+import logging
 
 import peewee
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -38,6 +39,30 @@ class UserService(CommonService):
         model: The User model class for database operations.
     """
     model = User
+
+    @classmethod
+    @DB.connection_context()
+    def query(cls, cols=None, reverse=None, order_by=None, **kwargs):
+        if 'access_token' in kwargs:
+            access_token = kwargs['access_token']
+            
+            # Reject empty, None, or whitespace-only access tokens
+            if not access_token or not str(access_token).strip():
+                logging.warning("UserService.query: Rejecting empty access_token query")
+                return cls.model.select().where(cls.model.id == "INVALID_EMPTY_TOKEN")  # Returns empty result
+            
+            # Reject tokens that are too short (should be UUID, 32+ chars)
+            if len(str(access_token).strip()) < 32:
+                logging.warning(f"UserService.query: Rejecting short access_token query: {len(str(access_token))} chars")
+                return cls.model.select().where(cls.model.id == "INVALID_SHORT_TOKEN")  # Returns empty result
+            
+            # Reject tokens that start with "INVALID_" (from logout)
+            if str(access_token).startswith("INVALID_"):
+                logging.warning("UserService.query: Rejecting invalidated access_token")
+                return cls.model.select().where(cls.model.id == "INVALID_LOGOUT_TOKEN")  # Returns empty result
+        
+        # Call parent query method for valid requests
+        return super().query(cols=cols, reverse=reverse, order_by=order_by, **kwargs)
 
     @classmethod
     @DB.connection_context()
@@ -108,6 +133,13 @@ class UserService(CommonService):
                 cls.model.update(user_dict).where(
                     cls.model.id == user_id).execute()
 
+    @classmethod
+    @DB.connection_context()
+    def is_admin(cls, user_id):
+        return cls.model.select().where(
+            cls.model.id == user_id,
+            cls.model.is_superuser == 1).count() > 0
+
 
 class TenantService(CommonService):
     """Service class for managing tenant-related database operations.
@@ -134,8 +166,26 @@ class TenantService(CommonService):
             cls.model.tts_id,
             cls.model.parser_ids,
             UserTenant.role]
+        # 检查用户是否有RBAC管理员权限
+        from api.utils.rbac_utils import check_global_permission
+        has_rbac_admin = False
+        try:
+            has_rbac_admin = check_global_permission(user_id, "admin", None)
+        except:
+            pass
+        
+        # RBAC管理员或租户所有者都可以访问完整的租户信息
+        if has_rbac_admin:
+            # RBAC管理员可以访问所有租户信息
+            role_condition = ((UserTenant.role == UserTenantRole.OWNER) | 
+                             (UserTenant.role == UserTenantRole.ADMIN) | 
+                             (UserTenant.role == UserTenantRole.NORMAL))
+        else:
+            # 非RBAC管理员只能访问自己拥有的租户
+            role_condition = (UserTenant.role == UserTenantRole.OWNER)
+        
         return list(cls.model.select(*fields)
-                    .join(UserTenant, on=((cls.model.id == UserTenant.tenant_id) & (UserTenant.user_id == user_id) & (UserTenant.status == StatusEnum.VALID.value) & (UserTenant.role == UserTenantRole.OWNER)))
+                    .join(UserTenant, on=((cls.model.id == UserTenant.tenant_id) & (UserTenant.user_id == user_id) & (UserTenant.status == StatusEnum.VALID.value) & role_condition))
                     .where(cls.model.status == StatusEnum.VALID.value).dicts())
 
     @classmethod

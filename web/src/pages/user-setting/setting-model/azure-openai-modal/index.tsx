@@ -46,9 +46,15 @@ const AzureOpenAIModal = ({
       { value: 'image2text', label: 'image2text' },
     ],
   };
-  const getOptions = (factory: string) => {
+  const getOptions = () => {
     return optionsMap.Default;
   };
+  const handleKeyDown = async (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      await handleOk();
+    }
+  };
+
   return (
     <Modal
       title={t('addLlmTitle', { name: llmFactory })}
@@ -83,14 +89,17 @@ const AzureOpenAIModal = ({
           name="api_base"
           rules={[{ required: true, message: t('baseUrlNameMessage') }]}
         >
-          <Input placeholder={t('baseUrlNameMessage')} />
+          <Input
+            placeholder={t('baseUrlNameMessage')}
+            onKeyDown={handleKeyDown}
+          />
         </Form.Item>
         <Form.Item<FieldType>
           label={t('apiKey')}
           name="api_key"
           rules={[{ required: false, message: t('apiKeyMessage') }]}
         >
-          <Input placeholder={t('apiKeyMessage')} />
+          <Input placeholder={t('apiKeyMessage')} onKeyDown={handleKeyDown} />
         </Form.Item>
         <Form.Item<FieldType>
           label={t('modelName')}
@@ -98,7 +107,10 @@ const AzureOpenAIModal = ({
           initialValue="gpt-3.5-turbo"
           rules={[{ required: true, message: t('modelNameMessage') }]}
         >
-          <Input placeholder={t('modelNameMessage')} />
+          <Input
+            placeholder={t('modelNameMessage')}
+            onKeyDown={handleKeyDown}
+          />
         </Form.Item>
         <Form.Item<FieldType>
           label={t('apiVersion')}
@@ -106,7 +118,10 @@ const AzureOpenAIModal = ({
           initialValue="2024-02-01"
           rules={[{ required: false, message: t('apiVersionMessage') }]}
         >
-          <Input placeholder={t('apiVersionMessage')} />
+          <Input
+            placeholder={t('apiVersionMessage')}
+            onKeyDown={handleKeyDown}
+          />
         </Form.Item>
         <Form.Item<FieldType>
           label={t('maxTokens')}
@@ -117,7 +132,7 @@ const AzureOpenAIModal = ({
               type: 'number',
               message: t('maxTokensInvalidMessage'),
             },
-            ({ getFieldValue }) => ({
+            ({}) => ({
               validator(_, value) {
                 if (value < 0) {
                   return Promise.reject(new Error(t('maxTokensMinMessage')));

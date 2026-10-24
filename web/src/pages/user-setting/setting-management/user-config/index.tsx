@@ -25,6 +25,8 @@ import {
 import React, { useEffect, useState } from 'react';
 import styles from './index.less';
 
+import { getLlmNameAndFIdByLlmId, getRealModelName } from '@/utils/llm-util';
+
 const { Option } = Select;
 
 interface UserConfigData {
@@ -45,6 +47,17 @@ const UserConfigPage = () => {
   );
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [searchValue, setSearchValue] = useState('');
+  const [chatModelOptions, setChatModelOptions] = useState<string[]>([]);
+  const [embeddingModelOptions, setEmbeddingModelOptions] = useState<string[]>(
+    [],
+  );
+  const [adminDefaults, setAdminDefaults] = useState<{
+    chat_model: string;
+    embedding_model: string;
+  }>({
+    chat_model: '',
+    embedding_model: '',
+  });
 
   const [editForm] = Form.useForm();
   const [pagination, setPagination] = useState({
@@ -53,40 +66,63 @@ const UserConfigPage = () => {
     total: 0,
   });
 
-  // 模拟可用的模型选项
-  const chatModelOptions = [
-    'gpt-4o',
-    'gpt-4o-mini',
-    'gpt-3.5-turbo',
-    'claude-3-opus',
-    'claude-3-sonnet',
-    'claude-3-haiku',
-    'gemini-pro',
-    'gemini-1.5-pro',
-  ];
+  // 加载已配置的模型选项
+  const loadConfiguredModels = async () => {
+    try {
+      const res = await request.get('/api/knowflow/v1/tenants/models', {
+        skipSnakeCase: true,
+      });
+      if (res?.data?.code === 0) {
+        const { chat_models, embedding_models } = res.data.data;
+        setChatModelOptions(chat_models || []);
+        setEmbeddingModelOptions(embedding_models || []);
+      } else {
+        console.error('获取已配置模型失败:', res?.data?.message);
+        setChatModelOptions([]);
+        setEmbeddingModelOptions([]);
+      }
+    } catch (error) {
+      console.error('加载已配置模型失败:', error);
+      message.error('加载模型选项失败，请稍后重试');
+      setChatModelOptions([]);
+      setEmbeddingModelOptions([]);
+    }
+  };
 
-  const embeddingModelOptions = [
-    'text-embedding-3-large',
-    'text-embedding-3-small',
-    'text-embedding-ada-002',
-    'sentence-transformers',
-    'bge-large-zh-v1.5',
-    'bge-small-zh-v1.5',
-  ];
+  // 加载管理员默认配置
+  const loadAdminDefaults = async () => {
+    try {
+      const res = await request.get('/api/knowflow/v1/tenants/admin-defaults', {
+        skipSnakeCase: true,
+      });
+      if (res?.data?.code === 0) {
+        setAdminDefaults(res.data.data);
+      }
+    } catch (error) {
+      console.error('加载管理员默认配置失败:', error);
+    }
+  };
 
   useEffect(() => {
     loadConfigData();
   }, [pagination.current, pagination.pageSize, searchValue]);
 
+  useEffect(() => {
+    loadConfiguredModels();
+    loadAdminDefaults();
+  }, []);
+
   const loadConfigData = async () => {
     setLoading(true);
     try {
-      const res = await request.get('/api/v1/tenants', {
+      const res = await request.get('/api/knowflow/v1/tenants', {
         params: {
           currentPage: pagination.current,
           size: pagination.pageSize,
           username: searchValue,
         },
+        // 保持与后端参数命名一致（camelCase）
+        skipSnakeCase: true,
       });
       const data = res?.data?.data || {};
       setConfigData(data.list || []);
@@ -113,8 +149,8 @@ const UserConfigPage = () => {
     setCurrentConfig(record);
     editForm.setFieldsValue({
       username: record.username,
-      chatModel: record.chatModel,
-      embeddingModel: record.embeddingModel,
+      chatModel: record.chatModel || adminDefaults.chat_model,
+      embeddingModel: record.embeddingModel || adminDefaults.embedding_model,
     });
     setEditModalVisible(true);
   };
@@ -124,8 +160,10 @@ const UserConfigPage = () => {
       const values = await editForm.validateFields();
       setLoading(true);
       if (currentConfig) {
-        await request.put(`/api/v1/tenants/${currentConfig.id}`, {
+        await request.put(`/api/knowflow/v1/tenants/${currentConfig.id}`, {
           data: values,
+          // 保持与后端字段命名一致（camelCase）
+          skipSnakeCase: true,
         });
         message.success('修改配置成功');
         setEditModalVisible(false);
@@ -143,26 +181,17 @@ const UserConfigPage = () => {
   };
 
   const getModelDisplayName = (model: string): string => {
-    const modelMap: { [key: string]: string } = {
-      'gpt-4o': 'GPT-4o',
-      'gpt-4o-mini': 'GPT-4o Mini',
-      'gpt-3.5-turbo': 'GPT-3.5 Turbo',
-      'claude-3-opus': 'Claude-3 Opus',
-      'claude-3-sonnet': 'Claude-3 Sonnet',
-      'claude-3-haiku': 'Claude-3 Haiku',
-      'gemini-pro': 'Gemini Pro',
-      'gemini-1.5-pro': 'Gemini 1.5 Pro',
-      'text-embedding-3-large': 'Text Embedding 3 Large',
-      'text-embedding-3-small': 'Text Embedding 3 Small',
-      'text-embedding-ada-002': 'Ada 002',
-      'sentence-transformers': 'Sentence Transformers',
-      'bge-large-zh-v1.5': 'BGE Large ZH v1.5',
-      'bge-small-zh-v1.5': 'BGE Small ZH v1.5',
-    };
-    return modelMap[model] || model;
+    if (!model) return '未设置';
+    // 优先解析形如 "modelName__Factory@Factory" 的 id
+    const { llmName } = getLlmNameAndFIdByLlmId(model);
+    const parsed = getRealModelName(llmName || model);
+    if (parsed) return parsed;
+
+    return model;
   };
 
   const getModelColor = (model: string): string => {
+    if (!model) return 'default';
     if (model.includes('gpt')) return 'green';
     if (model.includes('claude')) return 'blue';
     if (model.includes('gemini')) return 'purple';
@@ -190,27 +219,30 @@ const UserConfigPage = () => {
       ellipsis: {
         showTitle: false,
       },
-      render: (model: string) => (
-        <Tag
-          color={getModelColor(model)}
-          icon={<RobotOutlined />}
-          style={{ maxWidth: '160px' }}
-        >
-          <span
-            title={getModelDisplayName(model)}
-            style={{
-              display: 'inline-block',
-              maxWidth: '120px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              verticalAlign: 'top',
-            }}
+      render: (model: string) => {
+        const display = getModelDisplayName(model);
+        return (
+          <Tag
+            color={getModelColor(model)}
+            icon={<RobotOutlined />}
+            style={{ maxWidth: '160px' }}
           >
-            {getModelDisplayName(model)}
-          </span>
-        </Tag>
-      ),
+            <span
+              title={display}
+              style={{
+                display: 'inline-block',
+                maxWidth: '120px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                verticalAlign: 'top',
+              }}
+            >
+              {display}
+            </span>
+          </Tag>
+        );
+      },
     },
     {
       title: '嵌入模型',
@@ -220,27 +252,30 @@ const UserConfigPage = () => {
       ellipsis: {
         showTitle: false,
       },
-      render: (model: string) => (
-        <Tag
-          color={getModelColor(model)}
-          icon={<ApiOutlined />}
-          style={{ maxWidth: '160px' }}
-        >
-          <span
-            title={getModelDisplayName(model)}
-            style={{
-              display: 'inline-block',
-              maxWidth: '120px',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-              verticalAlign: 'top',
-            }}
+      render: (model: string) => {
+        const display = getModelDisplayName(model);
+        return (
+          <Tag
+            color={getModelColor(model)}
+            icon={<ApiOutlined />}
+            style={{ maxWidth: '160px' }}
           >
-            {getModelDisplayName(model)}
-          </span>
-        </Tag>
-      ),
+            <span
+              title={display}
+              style={{
+                display: 'inline-block',
+                maxWidth: '120px',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                verticalAlign: 'top',
+              }}
+            >
+              {display}
+            </span>
+          </Tag>
+        );
+      },
     },
     {
       title: '更新时间',
@@ -363,19 +398,20 @@ const UserConfigPage = () => {
             rules={[{ required: true, message: '请选择聊天模型' }]}
           >
             <Select
-              placeholder="请选择聊天模型"
+              placeholder={`请选择聊天模型${adminDefaults.chat_model ? ` (默认: ${getModelDisplayName(adminDefaults.chat_model)})` : ''}`}
               showSearch
-              filterOption={(input, option) =>
-                (option?.children as unknown as string)
-                  ?.toLowerCase()
-                  .includes(input.toLowerCase())
-              }
+              optionFilterProp="value"
             >
               {chatModelOptions.map((model) => (
                 <Option key={model} value={model}>
                   <Space>
                     <RobotOutlined />
                     {getModelDisplayName(model)}
+                    {model === adminDefaults.chat_model && (
+                      <Tag size="small" color="blue">
+                        默认
+                      </Tag>
+                    )}
                   </Space>
                 </Option>
               ))}
@@ -387,19 +423,20 @@ const UserConfigPage = () => {
             rules={[{ required: true, message: '请选择嵌入模型' }]}
           >
             <Select
-              placeholder="请选择嵌入模型"
+              placeholder={`请选择嵌入模型${adminDefaults.embedding_model ? ` (默认: ${getModelDisplayName(adminDefaults.embedding_model)})` : ''}`}
               showSearch
-              filterOption={(input, option) =>
-                (option?.children as unknown as string)
-                  ?.toLowerCase()
-                  .includes(input.toLowerCase())
-              }
+              optionFilterProp="value"
             >
               {embeddingModelOptions.map((model) => (
                 <Option key={model} value={model}>
                   <Space>
                     <ApiOutlined />
                     {getModelDisplayName(model)}
+                    {model === adminDefaults.embedding_model && (
+                      <Tag size="small" color="blue">
+                        默认
+                      </Tag>
+                    )}
                   </Space>
                 </Option>
               ))}
@@ -410,6 +447,8 @@ const UserConfigPage = () => {
         <div className={styles.formTip}>
           <p>• 聊天模型用于处理对话和文本生成任务</p>
           <p>• 嵌入模型用于文档向量化和语义搜索</p>
+          <p>• 模型选项来源于所有租户的已配置模型</p>
+          <p>• 用户模型默认值与超级管理员保持一致</p>
           <p>• 修改后将立即生效，影响该用户的所有操作</p>
         </div>
       </Modal>

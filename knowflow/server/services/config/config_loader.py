@@ -9,8 +9,32 @@ from .business_config import RootConfig
 logger = logging.getLogger(__name__)
 
 ENV_PREFIX = "KNOWFLOW_"
-CONFIG_DIR = Path(__file__).parent
-DEFAULT_CONFIG_PATH = CONFIG_DIR / "settings.yaml"
+
+# 配置文件路径优先级：
+# 1. 环境变量 KNOWFLOW_SETTINGS_PATH（最高优先级）
+# 2. docker/knowflow-server/settings.yaml（本地开发和Docker部署统一使用）
+# 3. 当前目录下的 settings.yaml（向后兼容）
+def _get_config_path() -> Path:
+    """获取配置文件路径"""
+    # 优先使用环境变量指定的路径
+    env_path = os.environ.get('KNOWFLOW_SETTINGS_PATH')
+    if env_path:
+        return Path(env_path)
+
+    # 尝试使用项目根目录下的 docker/knowflow-server/settings.yaml
+    current_dir = Path(__file__).parent
+    # 从 knowflow/server/services/config 向上 4 层到项目根目录
+    project_root = current_dir.parent.parent.parent.parent
+    docker_config_path = project_root / "docker" / "knowflow-server" / "settings.yaml"
+
+    if docker_config_path.exists():
+        return docker_config_path
+
+    # 向后兼容：使用当前目录下的 settings.yaml
+    fallback_path = current_dir / "settings.yaml"
+    return fallback_path
+
+DEFAULT_CONFIG_PATH = _get_config_path()
 
 def _load_config_from_yaml(path: Path) -> Dict[str, Any]:
     """从YAML文件加载配置"""
@@ -66,7 +90,6 @@ def _load_mineru_env_vars() -> Dict[str, Any]:
     env_mappings = {
         # FastAPI客户端配置
         'MINERU_FASTAPI_URL': 'fastapi.url',
-        'MINERU_FASTAPI_TIMEOUT': 'fastapi.timeout',
         'MINERU_FASTAPI_BACKEND': 'default_backend',
         
         # Pipeline后端配置
@@ -76,8 +99,7 @@ def _load_mineru_env_vars() -> Dict[str, Any]:
         'MINERU_TABLE_ENABLE': 'pipeline.table_enable',
         
         # VLM后端配置
-        'MINERU_VLM_SERVER_URL': 'vlm.sglang.server_url',
-        'SGLANG_SERVER_URL': 'vlm.sglang.server_url',  # 兼容旧变量
+        'MINERU_VLM_HTTP_SERVER_URL': 'vlm.http_client.server_url',
         
         # 额外的MinerU服务端配置（用于web_api目录）
         'MINERU_MODEL_SOURCE': 'model.source',
@@ -110,12 +132,53 @@ def _load_mineru_env_vars() -> Dict[str, Any]:
         return {'mineru': mineru_env_config}
     return {}
 
+def _load_dots_env_vars() -> Dict[str, Any]:
+    """从环境变量加载DOTS相关配置"""
+    dots_env_config = {}
+    
+    # DOTS环境变量映射
+    env_mappings = {
+        # VLLM服务配置
+        'DOTS_VLLM_URL': 'vllm.url',
+        'DOTS_MODEL_NAME': 'vllm.model_name',
+        'DOTS_TEMPERATURE': 'vllm.temperature',
+        'DOTS_TOP_P': 'vllm.top_p',
+        'DOTS_MAX_COMPLETION_TOKENS': 'vllm.max_completion_tokens',
+
+    }
+    
+    for env_key, config_path in env_mappings.items():
+        env_value = os.environ.get(env_key)
+        if env_value is not None:
+            # 类型转换
+            if env_value.lower() in ["true", "false"]:
+                processed_value = env_value.lower() == "true"
+            elif env_value.replace('.', '').isdigit():  # 处理浮点数
+                try:
+                    processed_value = float(env_value) if '.' in env_value else int(env_value)
+                except (ValueError, TypeError):
+                    processed_value = env_value
+            else:
+                processed_value = env_value
+            
+            # 设置嵌套配置
+            parts = config_path.split('.')
+            d = dots_env_config
+            for part in parts[:-1]:
+                d = d.setdefault(part, {})
+            d[parts[-1]] = processed_value
+    
+    if dots_env_config:
+        return {'dots': dots_env_config}
+    return {}
+
 def load_configuration() -> RootConfig:
     """
     加载、合并和验证配置
-    加载顺序: 默认YAML -> 环境变量 -> MinerU环境变量
+    加载顺序: 默认YAML -> 环境变量 -> MinerU环境变量 -> DOTS环境变量
     """
     # 1. 从默认YAML文件加载
+    logger.info(f"加载配置文件: {DEFAULT_CONFIG_PATH.absolute()}")
     config_data = _load_config_from_yaml(DEFAULT_CONFIG_PATH)
 
     # 2. 从KNOWFLOW_环境变量加载并覆盖
@@ -127,8 +190,13 @@ def load_configuration() -> RootConfig:
     mineru_env_data = _load_mineru_env_vars()
     if mineru_env_data:
         config_data = _recursive_update(config_data, mineru_env_data)
+        
+    # 4. 从DOTS环境变量加载并覆盖
+    dots_env_data = _load_dots_env_vars()
+    if dots_env_data:
+        config_data = _recursive_update(config_data, dots_env_data)
 
-    # 4. 使用Pydantic模型进行验证
+    # 5. 使用Pydantic模型进行验证
     try:
         return RootConfig.model_validate(config_data)
     except Exception as e:
@@ -139,14 +207,12 @@ def get_mineru_env_mapping() -> Dict[str, str]:
     """获取MinerU环境变量到配置路径的映射"""
     return {
         'MINERU_FASTAPI_URL': 'mineru.fastapi.url',
-        'MINERU_FASTAPI_TIMEOUT': 'mineru.fastapi.timeout',
         'MINERU_FASTAPI_BACKEND': 'mineru.default_backend',
         'MINERU_PARSE_METHOD': 'mineru.pipeline.parse_method',
         'MINERU_LANG': 'mineru.pipeline.lang',
         'MINERU_FORMULA_ENABLE': 'mineru.pipeline.formula_enable',
         'MINERU_TABLE_ENABLE': 'mineru.pipeline.table_enable',
-        'MINERU_VLM_SERVER_URL': 'mineru.vlm.sglang.server_url',
-        'SGLANG_SERVER_URL': 'mineru.vlm.sglang.server_url',
+        'MINERU_VLM_HTTP_SERVER_URL': 'mineru.vlm.http_client.server_url',
     }
 
 # 创建全局配置实例
@@ -154,6 +220,8 @@ CONFIG = load_configuration()
 APP_CONFIG = CONFIG.app
 EXCEL_CONFIG = CONFIG.excel
 MINERU_CONFIG = CONFIG.mineru
+DOTS_CONFIG = CONFIG.dots
+PADDLEOCR_CONFIG = CONFIG.paddleocr
 
 # 打印加载的配置（在开发模式下）
 if APP_CONFIG.dev_mode:

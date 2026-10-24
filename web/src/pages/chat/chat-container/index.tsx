@@ -24,15 +24,17 @@ import styles from './index.less';
 
 interface IProps {
   controller: AbortController;
+  setController?: (callback: (pre: AbortController) => AbortController) => void;
 }
 
-const ChatContainer = ({ controller }: IProps) => {
+const ChatContainer = ({ controller, setController }: IProps) => {
   const { conversationId } = useGetChatSearchParams();
   const { data: conversation } = useFetchNextConversation();
 
   const {
     value,
     ref,
+    messageContainerRef,
     loading,
     sendLoading,
     derivedMessages,
@@ -40,7 +42,8 @@ const ChatContainer = ({ controller }: IProps) => {
     handlePressEnter,
     regenerateMessage,
     removeMessageById,
-  } = useSendNextMessage(controller);
+    stopOutputMessage,
+  } = useSendNextMessage(controller, setController);
 
   const { visible, hideModal, documentId, selectedChunk, clickDocumentButton } =
     useClickDrawer();
@@ -53,7 +56,12 @@ const ChatContainer = ({ controller }: IProps) => {
 
   return (
     <>
-      <Flex flex={1} className={styles.chatContainer} vertical>
+      <Flex
+        flex={1}
+        className={styles.chatContainer}
+        vertical
+        ref={messageContainerRef}
+      >
         <Flex flex={1} vertical className={styles.messageContainer}>
           <div>
             <Spin spinning={loading}>
@@ -100,6 +108,7 @@ const ChatContainer = ({ controller }: IProps) => {
           createConversationBeforeUploadDocument={
             createConversationBeforeUploadDocument
           }
+          stopOutputMessage={stopOutputMessage}
         ></MessageInput>
       </Flex>
       <PdfDrawer

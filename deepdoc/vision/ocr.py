@@ -13,7 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 #
-
+import gc
 import logging
 import copy
 import time
@@ -348,6 +348,13 @@ class TextRecognizer:
 
         return img
 
+    def close(self):
+        # close session and release manually
+        logging.info('Close TextRecognizer.')
+        if hasattr(self, "predictor"):
+            del self.predictor
+        gc.collect()
+
     def __call__(self, img_list):
         img_num = len(img_list)
         # Calculate the aspect ratio of all text bars
@@ -394,6 +401,9 @@ class TextRecognizer:
                 rec_res[indices[beg_img_no + rno]] = rec_result[rno]
 
         return rec_res, time.time() - st
+
+    def __del__(self):
+        self.close()
 
 
 class TextDetector:
@@ -479,6 +489,12 @@ class TextDetector:
         dt_boxes = np.array(dt_boxes_new)
         return dt_boxes
 
+    def close(self):
+        logging.info("Close TextDetector.")
+        if hasattr(self, "predictor"):
+            del self.predictor
+        gc.collect()
+
     def __call__(self, img):
         ori_im = img.copy()
         data = {'image': img}
@@ -508,6 +524,9 @@ class TextDetector:
 
         return dt_boxes, time.time() - st
 
+    def __del__(self):
+        self.close()
+
 
 class OCR:
     def __init__(self, model_dir=None):
@@ -529,31 +548,30 @@ class OCR:
                         "rag/res/deepdoc")
                 
                 # Append muti-gpus task to the list
-                if PARALLEL_DEVICES is not None and PARALLEL_DEVICES > 0:
+                if PARALLEL_DEVICES > 0:
                     self.text_detector = []
                     self.text_recognizer = []
                     for device_id in range(PARALLEL_DEVICES):
                         self.text_detector.append(TextDetector(model_dir, device_id))
                         self.text_recognizer.append(TextRecognizer(model_dir, device_id))
                 else:
-                    self.text_detector = [TextDetector(model_dir, 0)]
-                    self.text_recognizer = [TextRecognizer(model_dir, 0)]
+                    self.text_detector = [TextDetector(model_dir)]
+                    self.text_recognizer = [TextRecognizer(model_dir)]
 
             except Exception:
                 model_dir = snapshot_download(repo_id="InfiniFlow/deepdoc",
                                               local_dir=os.path.join(get_project_base_directory(), "rag/res/deepdoc"),
                                               local_dir_use_symlinks=False)
                 
-                if PARALLEL_DEVICES is not None:
-                    assert PARALLEL_DEVICES > 0, "Number of devices must be >= 1"
+                if PARALLEL_DEVICES > 0:
                     self.text_detector = []
                     self.text_recognizer = []
                     for device_id in range(PARALLEL_DEVICES):
                         self.text_detector.append(TextDetector(model_dir, device_id))
                         self.text_recognizer.append(TextRecognizer(model_dir, device_id))
                 else:
-                    self.text_detector = [TextDetector(model_dir, 0)]
-                    self.text_recognizer = [TextRecognizer(model_dir, 0)]
+                    self.text_detector = [TextDetector(model_dir)]
+                    self.text_recognizer = [TextRecognizer(model_dir)]
 
         self.drop_score = 0.5
         self.crop_image_res_index = 0
@@ -589,7 +607,29 @@ class OCR:
             flags=cv2.INTER_CUBIC)
         dst_img_height, dst_img_width = dst_img.shape[0:2]
         if dst_img_height * 1.0 / dst_img_width >= 1.5:
-            dst_img = np.rot90(dst_img)
+            # Try original orientation
+            rec_result = self.text_recognizer[0]([dst_img])
+            text, score = rec_result[0][0]
+            best_score = score
+            best_img = dst_img
+
+            # Try clockwise 90° rotation
+            rotated_cw = np.rot90(dst_img, k=3)
+            rec_result = self.text_recognizer[0]([rotated_cw])
+            rotated_cw_text, rotated_cw_score = rec_result[0][0]
+            if rotated_cw_score > best_score:
+                best_score = rotated_cw_score
+                best_img = rotated_cw
+
+            # Try counter-clockwise 90° rotation
+            rotated_ccw = np.rot90(dst_img, k=1)
+            rec_result = self.text_recognizer[0]([rotated_ccw])
+            rotated_ccw_text, rotated_ccw_score = rec_result[0][0]
+            if rotated_ccw_score > best_score:
+                best_img = rotated_ccw
+
+            # Use the best image
+            dst_img = best_img
         return dst_img
 
     def sorted_boxes(self, dt_boxes):

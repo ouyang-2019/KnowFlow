@@ -11,6 +11,7 @@ import {
 } from '@/hooks/knowledge-hooks';
 import { useGetPaginationWithRouter } from '@/hooks/logic-hooks';
 import { IReference } from '@/interfaces/database/chat';
+import { SearchOutlined } from '@ant-design/icons';
 import {
   Card,
   Divider,
@@ -30,7 +31,7 @@ import {
 } from 'antd';
 import DOMPurify from 'dompurify';
 import { isEmpty } from 'lodash';
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import MarkdownContent from '../chat/markdown-content';
 import { useSendQuestion, useShowMindMapDrawer } from './hooks';
@@ -81,8 +82,26 @@ const SearchPage = () => {
     handleTestChunk(selectedDocumentIds, pageNumber, pageSize);
   };
 
+  const handleSearch = useCallback(() => {
+    sendQuestion(searchStr);
+  }, [searchStr, sendQuestion]);
+
   const suffixSearch = (
-    <div className={styles.sufSearch} onClick={sendQuestion}></div>
+    <SearchOutlined
+      onClick={handleSearch}
+      style={{
+        fontSize: 20,
+        color: '#3b82f6',
+        cursor: 'pointer',
+        transition: 'all 0.2s',
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.transform = 'scale(1.1)';
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = 'scale(1)';
+      }}
+    />
   );
 
   const InputSearch = (
@@ -91,8 +110,7 @@ const SearchPage = () => {
       onChange={handleSearchStrChange}
       placeholder={t('header.search')}
       allowClear
-      // enterButton
-      // onSearch={sendQuestion}
+      onPressEnter={handleSearch}
       size="large"
       suffix={suffixSearch}
       loading={sendingLoading}

@@ -1,4 +1,4 @@
-import { useLogin, useRegister } from '@/hooks/login-hooks';
+import { useLogin, useRegister, useSystemConfig } from '@/hooks/login-hooks';
 import { rsaPsw } from '@/utils';
 import { Button, Form, Input } from 'antd';
 import { useEffect, useState } from 'react';
@@ -13,17 +13,30 @@ const Login = () => {
   const navigate = useNavigate();
   const { login, loading: signLoading } = useLogin();
   const { register, loading: registerLoading } = useRegister();
+  const { data: systemConfig } = useSystemConfig();
   // const { t } = useTranslation('translation', { keyPrefix: 'login' });
   const loading = signLoading || registerLoading;
 
+  // 获取注册是否启用的配置
+  const isRegisterEnabled = systemConfig?.registerEnabled === 1;
+
   const changeTitle = () => {
-    setTitle((title) => (title === 'login' ? 'register' : 'login'));
+    if (isRegisterEnabled) {
+      setTitle((title) => (title === 'login' ? 'register' : 'login'));
+    }
   };
   const [form] = Form.useForm();
 
   useEffect(() => {
     form.validateFields(['nickname']);
   }, [form]);
+
+  // 如果注册被禁用且当前在注册页面，自动切换到登录页面
+  useEffect(() => {
+    if (!isRegisterEnabled && title === 'register') {
+      setTitle('login');
+    }
+  }, [isRegisterEnabled, title]);
 
   const onCheck = async () => {
     try {
@@ -72,12 +85,6 @@ const Login = () => {
               <div className={styles.logo}></div>
               <div className={styles.name}>KnowFlow</div>
             </div>
-            <span>
-              {title === 'login' ? '很高兴再次见到您' : '很高兴您加入'}
-              {/* {title === 'login'
-                ? t('loginDescription')
-                : t('registerDescription')} */}
-            </span>
           </div>
 
           <Form
@@ -122,7 +129,7 @@ const Login = () => {
               </Form.Item>
             )} */}
             <div>
-              {title === 'login' && (
+              {title === 'login' && isRegisterEnabled && (
                 <div>
                   {'没有账号?'}
                   <Button type="link" onClick={changeTitle}>
@@ -130,7 +137,7 @@ const Login = () => {
                   </Button>
                 </div>
               )}
-              {title === 'register' && (
+              {title === 'register' && isRegisterEnabled && (
                 <div>
                   {'已有账号?'}
                   <Button type="link" onClick={changeTitle}>

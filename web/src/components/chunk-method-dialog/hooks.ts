@@ -15,6 +15,12 @@ const ParserListMap = new Map([
       'one',
       'qa',
       'knowledge_graph',
+      'smart',
+      'regex',
+      'parent_child',
+      'title',
+      'mineru',
+      'dots',
     ],
   ],
   [
@@ -37,7 +43,7 @@ const ParserListMap = new Map([
   [['ppt', 'pptx'], ['presentation']],
   [
     ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tif', 'tiff', 'webp', 'svg', 'ico'],
-    ['picture'],
+    ['picture', 'dots'],
   ],
   [
     ['txt'],
@@ -100,7 +106,17 @@ export const useFetchParserListOnMount = (
     }
 
     return getParserList(
-      ['naive', 'resume', 'book', 'laws', 'one', 'qa', 'table'],
+      [
+        'naive',
+        'resume',
+        'book',
+        'laws',
+        'one',
+        'qa',
+        'table',
+        'mineru',
+        'dots',
+      ],
       parserList,
     );
   }, [parserList, documentExtension]);

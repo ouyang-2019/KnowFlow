@@ -22,6 +22,10 @@ from api.db.db_models import DB, Document, Knowledgebase, Tenant, User, UserTena
 from api.db.services.common_service import CommonService
 from api.utils import current_timestamp, datetime_format
 
+# 导入 RBAC 相关功能（延迟导入避免循环依赖）
+import logging
+logger = logging.getLogger(__name__)
+
 
 class KnowledgebaseService(CommonService):
     """Service class for managing knowledge base operations.
@@ -48,7 +52,8 @@ class KnowledgebaseService(CommonService):
         """Check if a knowledge base can be deleted by a specific user.
 
         This method verifies whether a user has permission to delete a knowledge base
-        by checking if they are the creator of that knowledge base.
+        by first checking RBAC permissions, and if no RBAC permission exists,
+        falls back to checking if they are the creator of that knowledge base.
 
         Args:
             kb_id (str): The unique identifier of the knowledge base to check.
@@ -63,12 +68,29 @@ class KnowledgebaseService(CommonService):
             True
 
         Note:
-            - This method only checks creator permissions
-            - A return value of False can mean either:
-                1. The knowledge base doesn't exist
-                2. The user is not the creator of the knowledge base
+            - Priority 1: Check RBAC admin permissions (including super admin)
+            - Priority 2: Fallback to original creator permission check
+            - A return value of False means the user has neither RBAC permission nor creator permission
         """
-        # Check if a knowledge base can be deleted by a user
+        # Priority 1: Check RBAC permissions first
+        try:
+            from api.utils.rbac_utils import check_rbac_permission, RBACResourceType, RBACPermissionType
+            # Check for admin permission through RBAC system (includes super admin)
+            has_rbac_permission = check_rbac_permission(
+                user_id=user_id,
+                resource_type=RBACResourceType.KNOWLEDGEBASE,
+                resource_id=kb_id,
+                permission_type=RBACPermissionType.KB_ADMIN
+                # 不传tenant_id，让RBAC底层使用default
+            )
+            if has_rbac_permission:
+                return True
+        except Exception as e:
+            # If RBAC check fails, log the error but continue to original logic
+            import logging
+            logging.warning(f"RBAC permission check failed for user {user_id} on KB {kb_id}: {e}")
+        
+        # Priority 2: Fallback to original creator permission check
         docs = cls.model.select(
             cls.model.id).where(cls.model.id == kb_id, cls.model.created_by == user_id).paginate(0, 1)
         docs = docs.dicts()
@@ -125,6 +147,96 @@ class KnowledgebaseService(CommonService):
         doc_ids = [doc["document_id"] for doc in doc_ids]
         return doc_ids
 
+    @classmethod
+    @DB.connection_context()
+    def get_by_tenant_ids_with_rbac(cls, joined_tenant_ids, user_id,
+                                   page_number, items_per_page,
+                                   orderby, desc, keywords,
+                                   parser_id=None
+                                   ):
+        # Get knowledge bases with RBAC permission checking only
+        # Args:
+        #     joined_tenant_ids: List of tenant IDs
+        #     user_id: Current user ID
+        #     page_number: Page number for pagination
+        #     items_per_page: Number of items per page
+        #     orderby: Field to order by
+        #     desc: Boolean indicating descending order
+        #     keywords: Search keywords
+        #     parser_id: Optional parser ID filter
+        # Returns:
+        #     Tuple of (knowledge_base_list, total_count)
+
+        # Import RBAC utilities
+        from api.utils.rbac_utils import batch_check_rbac_permissions, RBACResourceType, RBACPermissionType
+
+        fields = [
+            cls.model.id,
+            cls.model.avatar,
+            cls.model.name,
+            cls.model.language,
+            cls.model.description,
+            cls.model.tenant_id,
+            cls.model.permission,
+            cls.model.doc_num,
+            cls.model.token_num,
+            cls.model.chunk_num,
+            cls.model.parser_id,
+            cls.model.embd_id,
+            User.nickname,
+            User.avatar.alias('tenant_avatar'),
+            cls.model.update_time
+        ]
+
+        # Build base query
+        base_query = cls.model.select(*fields).join(User, on=(cls.model.tenant_id == User.id)).where(
+            cls.model.status == StatusEnum.VALID.value
+        )
+
+        # Apply keyword filter
+        if keywords:
+            base_query = base_query.where(fn.LOWER(cls.model.name).contains(keywords.lower()))
+
+        # Apply parser filter
+        if parser_id:
+            base_query = base_query.where(cls.model.parser_id == parser_id)
+
+        # Get all knowledge bases first
+        all_kbs = list(base_query.dicts())
+
+        # If no knowledge bases found, return empty result
+        if not all_kbs:
+            return [], 0
+
+        # Extract all KB IDs for batch permission check
+        kb_ids = [kb['id'] for kb in all_kbs]
+
+        # Batch check RBAC permissions - single HTTP request
+        permissions = batch_check_rbac_permissions(
+            user_id=user_id,
+            resource_type=RBACResourceType.KNOWLEDGEBASE,
+            resource_ids=kb_ids,
+            permission_type=RBACPermissionType.KB_READ
+        )
+
+        # Filter by permissions
+        accessible_kbs = [kb for kb in all_kbs if permissions.get(kb['id'], False)]
+
+        # Apply sorting
+        if orderby and hasattr(cls.model, orderby):
+            reverse_sort = desc if isinstance(desc, bool) else (desc == 'true' or desc == True)
+            accessible_kbs.sort(key=lambda x: x.get(orderby, ''), reverse=reverse_sort)
+
+        total_count = len(accessible_kbs)
+
+        # Apply pagination
+        if page_number and items_per_page:
+            start_idx = (page_number - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            accessible_kbs = accessible_kbs[start_idx:end_idx]
+
+        return accessible_kbs, total_count
+    
     @classmethod
     @DB.connection_context()
     def get_by_tenant_ids(cls, joined_tenant_ids, user_id,
@@ -358,12 +470,30 @@ class KnowledgebaseService(CommonService):
     @classmethod
     @DB.connection_context()
     def accessible(cls, kb_id, user_id):
-        # Check if a knowledge base is accessible by a user
-        # Args:
-        #     kb_id: Knowledge base ID
-        #     user_id: User ID
-        # Returns:
-        #     Boolean indicating accessibility
+        """Check if a knowledge base is accessible by a user.
+
+        This method checks accessibility using RBAC permissions first,
+        then falls back to tenant-based permission checking.
+
+        Args:
+            kb_id: Knowledge base ID
+            user_id: User ID
+        Returns:
+            Boolean indicating accessibility
+        """
+        # 尝试使用 RBAC 权限检查（延迟导入避免循环依赖）
+        try:
+            from api.utils.rbac_utils import check_rbac_permission, RBACPermissionType, RBACResourceType
+
+            # 检查用户是否有读权限
+            if check_rbac_permission(user_id, RBACResourceType.KNOWLEDGEBASE, kb_id, RBACPermissionType.KB_READ):
+                return True
+
+            logger.debug(f"RBAC check failed for user {user_id} on kb {kb_id}, falling back to tenant check")
+        except Exception as e:
+            logger.warning(f"RBAC权限检查失败，回退到租户检查: {e}")
+
+        # 回退到原有的租户检查
         docs = cls.model.select(
             cls.model.id).join(UserTenant, on=(UserTenant.tenant_id == Knowledgebase.tenant_id)
                                ).where(cls.model.id == kb_id, UserTenant.user_id == user_id).paginate(0, 1)

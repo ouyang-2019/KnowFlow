@@ -1,5 +1,7 @@
 export enum Routes {
+  Root = '/',
   Login = '/login',
+  Logout = '/logout',
   Home = '/home',
   Datasets = '/datasets',
   DatasetBase = '/dataset',
@@ -7,12 +9,26 @@ export enum Routes {
   Agent = '/agent',
   AgentTemplates = '/agent-templates',
   Agents = '/agents',
+  AgentList = '/agent-list',
   Searches = '/next-searches',
   Search = '/next-search',
+  SearchShare = '/next-search/share',
   Chats = '/next-chats',
   Chat = '/next-chat',
   Files = '/files',
   ProfileSetting = '/profile-setting',
+  Profile = '/profile',
+  Mcp = '/mcp',
+  Team = '/team',
+  Plan = '/plan',
+  Model = '/model',
+  Prompt = '/prompt',
+  ProfileMcp = `${ProfileSetting}${Mcp}`,
+  ProfileTeam = `${ProfileSetting}${Team}`,
+  ProfilePlan = `${ProfileSetting}${Plan}`,
+  ProfileModel = `${ProfileSetting}${Model}`,
+  ProfilePrompt = `${ProfileSetting}${Prompt}`,
+  ProfileProfile = `${ProfileSetting}${Profile}`,
   DatasetTesting = '/testing',
   DatasetSetting = '/setting',
   Chunk = '/chunk',
@@ -21,6 +37,16 @@ export enum Routes {
   ParsedResult = `${Chunk}${Parsed}`,
   Result = '/result',
   ResultView = `${Chunk}${Result}`,
+  KnowledgeGraph = '/knowledge-graph',
+  AgentLogPage = '/agent-log-page',
+  AgentShare = '/agent/share',
+  ChatShare = `${Chats}/share`,
+  UserSetting = '/user-setting',
+  DataFlows = '/data-flows',
+  DataFlow = '/data-flow',
+  DataSetOverview = '/dataset-overview',
+  DataSetSetting = '/dataset-setting',
+  DataflowResult = '/dataflow-result',
 }
 
 const routes = [
@@ -40,15 +66,31 @@ const routes = [
     layout: false,
   },
   {
-    path: '/',
+    path: '/next-chat/share',
+    component: '@/pages/next-chats/share',
+    layout: false,
+  },
+  {
+    path: Routes.ChatShare,
+    component: `@/pages${Routes.ChatShare}`,
+    layout: false,
+  },
+  {
+    path: Routes.AgentShare,
+    component: `@/pages${Routes.AgentShare}`,
+    layout: false,
+  },
+  {
+    path: Routes.Root,
     component: '@/layouts',
     layout: false,
     wrappers: ['@/wrappers/auth'],
     routes: [
-      { path: '/', redirect: '/knowledge' },
+      { path: Routes.Root, redirect: '/knowledge' },
       {
         path: '/knowledge',
         component: '@/pages/knowledge',
+        // component: '@/pages/knowledge/datasets',
       },
       {
         path: '/knowledge',
@@ -93,6 +135,7 @@ const routes = [
           { path: '/user-setting', redirect: '/user-setting/profile' },
           {
             path: '/user-setting/profile',
+            // component: '@/pages/user-setting/setting-profile',
             component: '@/pages/user-setting/setting-profile',
           },
           {
@@ -118,6 +161,10 @@ const routes = [
           {
             path: '/user-setting/api',
             component: '@/pages/user-setting/setting-api',
+          },
+          {
+            path: `/user-setting${Routes.Mcp}`,
+            component: `@/pages${Routes.ProfileMcp}`,
           },
           {
             path: '/user-setting/management',
@@ -163,6 +210,10 @@ const routes = [
       {
         path: '/flow',
         component: '@/pages/flow/list',
+      },
+      {
+        path: Routes.AgentList,
+        component: `@/pages/${Routes.Agents}`,
       },
       {
         path: '/flow/:id',
@@ -218,7 +269,7 @@ const routes = [
     ],
   },
   {
-    path: Routes.Chat,
+    path: Routes.Chat + '/:id',
     layout: false,
     component: `@/pages${Routes.Chats}/chat`,
   },
@@ -234,9 +285,14 @@ const routes = [
     ],
   },
   {
-    path: Routes.Search,
+    path: `${Routes.Search}/:id`,
     layout: false,
     component: `@/pages${Routes.Search}`,
+  },
+  {
+    path: `${Routes.SearchShare}`,
+    layout: false,
+    component: `@/pages${Routes.SearchShare}`,
   },
   {
     path: Routes.Agents,
@@ -248,6 +304,11 @@ const routes = [
         component: `@/pages${Routes.Agents}`,
       },
     ],
+  },
+  {
+    path: `${Routes.AgentLogPage}/:id`,
+    layout: false,
+    component: `@/pages${Routes.Agents}${Routes.AgentLogPage}`,
   },
   {
     path: `${Routes.Agent}/:id`,
@@ -293,7 +354,29 @@ const routes = [
         path: `${Routes.DatasetBase}${Routes.DatasetTesting}/:id`,
         component: `@/pages${Routes.DatasetBase}${Routes.DatasetTesting}`,
       },
+      {
+        path: `${Routes.DatasetBase}${Routes.KnowledgeGraph}/:id`,
+        component: `@/pages${Routes.DatasetBase}${Routes.KnowledgeGraph}`,
+      },
+      {
+        path: `${Routes.DatasetBase}${Routes.DataSetOverview}/:id`,
+        component: `@/pages${Routes.DatasetBase}${Routes.DataSetOverview}`,
+      },
+      {
+        path: `${Routes.DatasetBase}${Routes.DataSetSetting}/:id`,
+        component: `@/pages${Routes.DatasetBase}${Routes.DataSetSetting}`,
+      },
     ],
+  },
+  {
+    path: `${Routes.DataflowResult}/:id`,
+    layout: false,
+    component: `@/pages${Routes.DataflowResult}`,
+  },
+  {
+    path: `${Routes.ParsedResult}/chunks`,
+    layout: false,
+    component: `@/pages${Routes.Chunk}/parsed-result/add-knowledge/components/knowledge-chunk`,
   },
   {
     path: Routes.Chunk,
@@ -303,10 +386,10 @@ const routes = [
         path: Routes.Chunk,
         component: `@/pages${Routes.Chunk}`,
         routes: [
-          {
-            path: `${Routes.ParsedResult}/:id`,
-            component: `@/pages${Routes.Chunk}/parsed-result`,
-          },
+          // {
+          //   path: `${Routes.ParsedResult}/:id`,
+          //   component: `@/pages${Routes.Chunk}/parsed-result`,
+          // },
           {
             path: `${Routes.ChunkResult}/:id`,
             component: `@/pages${Routes.Chunk}/chunk-result`,
@@ -331,29 +414,49 @@ const routes = [
     routes: [
       {
         path: Routes.ProfileSetting,
-        redirect: `${Routes.ProfileSetting}/profile`,
+        redirect: `${Routes.ProfileProfile}`,
       },
       {
-        path: `${Routes.ProfileSetting}/profile`,
-        component: `@/pages${Routes.ProfileSetting}/profile`,
+        path: `${Routes.ProfileProfile}`,
+        component: `@/pages${Routes.ProfileProfile}`,
       },
       {
-        path: `${Routes.ProfileSetting}/team`,
-        component: `@/pages${Routes.ProfileSetting}/team`,
+        path: `${Routes.ProfileTeam}`,
+        component: `@/pages${Routes.ProfileTeam}`,
       },
       {
-        path: `${Routes.ProfileSetting}/plan`,
-        component: `@/pages${Routes.ProfileSetting}/plan`,
+        path: `${Routes.ProfilePlan}`,
+        component: `@/pages${Routes.ProfilePlan}`,
       },
       {
-        path: `${Routes.ProfileSetting}/model`,
-        component: `@/pages${Routes.ProfileSetting}/model`,
+        path: `${Routes.ProfileModel}`,
+        component: `@/pages${Routes.ProfileModel}`,
       },
       {
-        path: `${Routes.ProfileSetting}/prompt`,
-        component: `@/pages${Routes.ProfileSetting}/prompt`,
+        path: `${Routes.ProfilePrompt}`,
+        component: `@/pages${Routes.ProfilePrompt}`,
+      },
+      {
+        path: Routes.ProfileMcp,
+        component: `@/pages${Routes.ProfileMcp}`,
       },
     ],
+  },
+  {
+    path: Routes.DataFlows,
+    layout: false,
+    component: '@/layouts/next',
+    routes: [
+      {
+        path: Routes.DataFlows,
+        component: `@/pages${Routes.DataFlows}`,
+      },
+    ],
+  },
+  {
+    path: `${Routes.DataFlow}/:id`,
+    layout: false,
+    component: `@/pages${Routes.DataFlow}`,
   },
 ];
 

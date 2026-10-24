@@ -7,7 +7,7 @@ import {
   useFetchUserInfo,
 } from '@/hooks/user-setting-hooks';
 import type { MenuProps } from 'antd';
-import { Flex, Menu } from 'antd';
+import { Menu } from 'antd';
 import React, { useEffect, useMemo } from 'react';
 import { useNavigate } from 'umi';
 import {
@@ -44,14 +44,7 @@ const SideBar = () => {
       key,
       icon,
       children,
-      label: (
-        <Flex justify={'space-between'}>
-          {t(label)}
-          <span className={styles.version}>
-            {label === 'system' && version}
-          </span>
-        </Flex>
-      ),
+      label: t(label),
       type,
     } as MenuItem;
   }
@@ -68,18 +61,13 @@ const SideBar = () => {
           return false;
         }
         if (x === UserSettingRouteKey.Management) {
-          return userInfo?.is_superuser;
+          // 检查用户是否为超级管理员或全局管理员（包含 RBAC 权限）
+          return userInfo?.is_superuser || userInfo?.is_admin;
         }
         return true;
       })
-      .map((x) => {
-        return {
-          key: x,
-          icon: UserSettingIconMap[x],
-          label: t(x),
-        };
-      });
-  }, [userInfo?.is_superuser, t]);
+      .map((value) => getItem(value, value, UserSettingIconMap[value]));
+  }, [userInfo?.is_superuser, userInfo?.is_admin]);
 
   const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
     if (key === UserSettingRouteKey.Logout) {

@@ -282,6 +282,7 @@ export const useSetConversation = () => {
 export const useSelectNextMessages = () => {
   const {
     ref,
+    messageContainerRef,
     setDerivedMessages,
     derivedMessages,
     addNewestAnswer,
@@ -328,6 +329,7 @@ export const useSelectNextMessages = () => {
 
   return {
     ref,
+    messageContainerRef,
     derivedMessages,
     loading,
     addNewestAnswer,
@@ -354,16 +356,20 @@ export const useHandleMessageInputChange = () => {
   };
 };
 
-export const useSendNextMessage = (controller: AbortController) => {
+export const useSendNextMessage = (
+  controller: AbortController,
+  setController?: (callback: (pre: AbortController) => AbortController) => void,
+) => {
   const { setConversation } = useSetConversation();
   const { conversationId, isNew } = useGetChatSearchParams();
   const { handleInputChange, value, setValue } = useHandleMessageInputChange();
 
-  const { send, answer, done } = useSendMessageWithSse(
+  const { send, answer, done, setDone } = useSendMessageWithSse(
     api.completeConversation,
   );
   const {
     ref,
+    messageContainerRef,
     derivedMessages,
     loading,
     addNewestAnswer,
@@ -479,6 +485,33 @@ export const useSendNextMessage = (controller: AbortController) => {
     [addNewestQuestion, handleSendMessage, done, setValue, value],
   );
 
+  const stopOutputMessage = useCallback(() => {
+    controller.abort();
+    setDone(true);
+    // Remove the last message if it's empty (assistant message that was being generated)
+    if (derivedMessages && derivedMessages.length > 0) {
+      const lastMessage = derivedMessages[derivedMessages.length - 1];
+      if (
+        lastMessage.role === MessageType.Assistant &&
+        !lastMessage.content.trim()
+      ) {
+        removeLatestMessage();
+      }
+    }
+    // Create a new controller for next request
+    if (setController) {
+      setController((pre) => {
+        return new AbortController();
+      });
+    }
+  }, [
+    controller,
+    setDone,
+    derivedMessages,
+    removeLatestMessage,
+    setController,
+  ]);
+
   return {
     handlePressEnter,
     handleInputChange,
@@ -488,8 +521,10 @@ export const useSendNextMessage = (controller: AbortController) => {
     sendLoading: !done,
     loading,
     ref,
+    messageContainerRef,
     derivedMessages,
     removeMessageById,
+    stopOutputMessage,
   };
 };
 

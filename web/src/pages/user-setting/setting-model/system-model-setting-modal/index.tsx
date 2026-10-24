@@ -1,7 +1,10 @@
 import { IModalManagerChildrenProps } from '@/components/modal-manager';
 import { LlmModelType } from '@/constants/knowledge';
 import { useTranslate } from '@/hooks/common-hooks';
-import { ISystemModelSettingSavingParams } from '@/hooks/llm-hooks';
+import {
+  ISystemModelSettingSavingParams,
+  useComposeLlmOptionsByModelTypes,
+} from '@/hooks/llm-hooks';
 import { Form, Modal, Select } from 'antd';
 import { useEffect } from 'react';
 import { useFetchSystemModelSettingOnMount } from '../hooks';
@@ -43,6 +46,11 @@ const SystemModelSettingModal = ({
 
   const onFormLayoutChange = () => {};
 
+  const modelOptions = useComposeLlmOptionsByModelTypes([
+    LlmModelType.Chat,
+    LlmModelType.Image2text,
+  ]);
+
   return (
     <Modal
       title={t('systemModelSettings')}
@@ -51,8 +59,6 @@ const SystemModelSettingModal = ({
       onCancel={hideModal}
       okButtonProps={{ loading }}
       confirmLoading={loading}
-      width={680}
-      style={{ minWidth: '600px' }}
     >
       <Form form={form} onValuesChange={onFormLayoutChange} layout={'vertical'}>
         <Form.Item
@@ -60,16 +66,7 @@ const SystemModelSettingModal = ({
           name="llm_id"
           tooltip={t('chatModelTip')}
         >
-          <Select
-            options={[
-              ...allOptions[LlmModelType.Chat],
-              ...allOptions[LlmModelType.Image2text],
-            ]}
-            allowClear
-            showSearch
-            optionFilterProp="label"
-            placeholder={t('pleaseSelect')}
-          />
+          <Select options={modelOptions} allowClear showSearch />
         </Form.Item>
         <Form.Item
           label={t('embeddingModel')}
@@ -80,8 +77,6 @@ const SystemModelSettingModal = ({
             options={allOptions[LlmModelType.Embedding]}
             allowClear
             showSearch
-            optionFilterProp="label"
-            placeholder={t('pleaseSelect')}
           />
         </Form.Item>
         <Form.Item
@@ -93,8 +88,6 @@ const SystemModelSettingModal = ({
             options={allOptions[LlmModelType.Image2text]}
             allowClear
             showSearch
-            optionFilterProp="label"
-            placeholder={t('pleaseSelect')}
           />
         </Form.Item>
 
@@ -107,8 +100,6 @@ const SystemModelSettingModal = ({
             options={allOptions[LlmModelType.Speech2text]}
             allowClear
             showSearch
-            optionFilterProp="label"
-            placeholder={t('pleaseSelect')}
           />
         </Form.Item>
         <Form.Item
@@ -120,8 +111,6 @@ const SystemModelSettingModal = ({
             options={allOptions[LlmModelType.Rerank]}
             allowClear
             showSearch
-            optionFilterProp="label"
-            placeholder={t('pleaseSelect')}
           />
         </Form.Item>
         <Form.Item
@@ -133,8 +122,6 @@ const SystemModelSettingModal = ({
             options={allOptions[LlmModelType.TTS]}
             allowClear
             showSearch
-            optionFilterProp="label"
-            placeholder={t('pleaseSelect')}
           />
         </Form.Item>
       </Form>

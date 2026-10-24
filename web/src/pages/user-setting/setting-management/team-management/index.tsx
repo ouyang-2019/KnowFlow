@@ -1,10 +1,12 @@
 import { useTranslate } from '@/hooks/common-hooks';
+import { useFetchUserInfo } from '@/hooks/user-setting-hooks';
 import request from '@/utils/request';
 import {
   DeleteOutlined,
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  SettingOutlined,
   TeamOutlined,
   UserOutlined,
 } from '@ant-design/icons';
@@ -52,8 +54,19 @@ interface UserData {
   email: string;
 }
 
+interface Role {
+  id: string;
+  name: string;
+  code: string;
+  description: string;
+}
+
 const TeamManagementPage = () => {
   const { t } = useTranslate('setting');
+
+  // 登录用户信息
+  const { data: userInfo } = useFetchUserInfo();
+  const userId = userInfo?.id;
   const [loading, setLoading] = useState(false);
   const [memberLoading, setMemberLoading] = useState(false);
   const [userLoading, setUserLoading] = useState(false);
@@ -65,13 +78,39 @@ const TeamManagementPage = () => {
 
   const [memberModalVisible, setMemberModalVisible] = useState(false);
   const [addMemberModalVisible, setAddMemberModalVisible] = useState(false);
+  const [roleModalVisible, setRoleModalVisible] = useState(false);
   const [currentTeam, setCurrentTeam] = useState<TeamData | null>(null);
   const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
   const [selectedUser, setSelectedUser] = useState<string>('');
   const [selectedRole, setSelectedRole] = useState<string>('normal');
+  const [teamRoles, setTeamRoles] = useState<Role[]>([]);
+  const [teamRolesMap, setTeamRolesMap] = useState<Record<string, Role>>({});
 
   const [searchForm] = Form.useForm();
   const [addMemberForm] = Form.useForm();
+  const [roleForm] = Form.useForm();
+  const [teamForm] = Form.useForm();
+  const [teamModalVisible, setTeamModalVisible] = useState(false);
+
+  // 角色优先级映射
+  const rolePriorityMap: Record<string, { priority: number; color: string }> = {
+    super_admin: { priority: 1, color: '#f50' }, // 超级管理员 - 红色
+    admin: { priority: 2, color: '#722ed1' }, // 管理员 - 紫色
+    editor: { priority: 3, color: '#1890ff' }, // 编辑者 - 蓝色
+    viewer: { priority: 4, color: '#52c41a' }, // 查看者 - 绿色
+    user: { priority: 5, color: '#d9d9d9' }, // 用户 - 灰色
+  };
+
+  // 获取最高优先级角色
+  const getHighestPriorityRole = (teamRolesList: Role[]): Role | null => {
+    if (!teamRolesList || teamRolesList.length === 0) return null;
+
+    return teamRolesList.reduce((highest, current) => {
+      const currentPriority = rolePriorityMap[current.code]?.priority || 999;
+      const highestPriority = rolePriorityMap[highest.code]?.priority || 999;
+      return currentPriority < highestPriority ? current : highest;
+    });
+  };
 
   const [pagination, setPagination] = useState({
     current: 1,
@@ -88,7 +127,7 @@ const TeamManagementPage = () => {
     setLoading(true);
     try {
       const values = searchForm.getFieldsValue();
-      const res = await request.get('/api/v1/teams', {
+      const res = await request.get('/api/knowflow/v1/teams', {
         params: {
           currentPage: pagination.current,
           size: pagination.pageSize,
@@ -97,8 +136,53 @@ const TeamManagementPage = () => {
         },
       });
       const data = res?.data?.data || {};
-      setTeamData(data.list || []);
+      const list = data.list || [];
+      setTeamData(list);
       setPagination((prev) => ({ ...prev, total: data.total || 0 }));
+
+      // 使用批量接口获取所有团队的角色
+      const rolesMap: Record<string, Role> = {};
+      if (list.length > 0) {
+        try {
+          // 提取团队ID列表
+          const teamIds = list.map((t: TeamData) => t.id);
+
+          // 并行请求批量角色查询和可分配角色列表
+          const [batchRolesRes, assignableRolesRes] = await Promise.all([
+            request.post('/api/knowflow/v1/rbac/teams/batch-roles', {
+              data: {
+                team_ids: teamIds,
+                tenant_id: 'default',
+              },
+            }),
+            request.get('/api/knowflow/v1/rbac/assignable-roles'),
+          ]);
+
+          // 处理批量查询结果
+          const teamRolesData = batchRolesRes?.data?.team_roles || {};
+          const allRoles = assignableRolesRes?.data?.data || [];
+
+          // 构建角色映射
+          Object.entries(teamRolesData).forEach(([teamId, teamRolesList]) => {
+            const roles = teamRolesList as any[];
+            if (roles && roles.length > 0) {
+              // 团队角色API返回的是包含role_code的对象
+              const teamRole = roles[0]; // 取第一个角色（单一角色语义）
+              const matchedRole = allRoles.find(
+                (role: Role) => role.code === teamRole.role_code,
+              );
+              if (matchedRole) {
+                rolesMap[teamId] = matchedRole;
+              }
+            }
+          });
+        } catch (error) {
+          console.error('批量获取团队角色失败:', error);
+          // 批量接口失败时的降级处理（可选）
+          // 可以选择静默失败，或者回退到单个查询
+        }
+      }
+      setTeamRolesMap(rolesMap);
     } catch (error) {
       message.error('加载团队数据失败');
     } finally {
@@ -109,7 +193,7 @@ const TeamManagementPage = () => {
   const loadUserList = async () => {
     setUserLoading(true);
     try {
-      const res = await request.get('/api/v1/users', {
+      const res = await request.get('/api/knowflow/v1/users', {
         params: {
           currentPage: 1,
           size: 1000, // Get all users for selection
@@ -132,7 +216,7 @@ const TeamManagementPage = () => {
   const loadTeamMembers = async (teamId: string) => {
     setMemberLoading(true);
     try {
-      const res = await request.get(`/api/v1/teams/${teamId}/members`);
+      const res = await request.get(`/api/knowflow/v1/teams/${teamId}/members`);
       const data = res?.data?.data || [];
       setTeamMembers(data);
 
@@ -161,10 +245,115 @@ const TeamManagementPage = () => {
     loadTeamData();
   };
 
+  const handleCreateTeam = () => {
+    teamForm.resetFields();
+    // 默认设置当前用户为负责人
+    if (userId) {
+      teamForm.setFieldsValue({ owner_id: userId });
+    }
+    setTeamModalVisible(true);
+  };
+
+  const handleTeamSubmit = async () => {
+    try {
+      const values = await teamForm.validateFields();
+      setLoading(true);
+      await request.post('/api/knowflow/v1/teams', {
+        data: {
+          name: values.name,
+          owner_id: values.owner_id,
+          description: values.description || '',
+        },
+      });
+      message.success('创建团队成功');
+      setTeamModalVisible(false);
+      await loadTeamData();
+    } catch (error) {
+      message.error('创建团队失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleManageMembers = (team: TeamData) => {
     setCurrentTeam(team);
     setMemberModalVisible(true);
     loadTeamMembers(team.id);
+  };
+
+  const handleTeamRoleManagement = async (team: TeamData) => {
+    setCurrentTeam(team);
+    try {
+      // 获取可分配的角色（根据当前用户权限过滤）
+      const rolesRes = await request.get(
+        '/api/knowflow/v1/rbac/assignable-roles',
+      );
+      setTeamRoles(rolesRes?.data?.data || []);
+
+      // 获取团队当前已分配角色，用于预选中
+      const assignedRes = await request.get(
+        `/api/knowflow/v1/teams/${team.id}/roles`,
+      );
+      const teamRolesList = assignedRes?.data?.data ?? [];
+
+      let selectedRoleId = '';
+      if (teamRolesList.length > 0) {
+        // 根据role_code找到对应的角色ID
+        const teamRole = teamRolesList[0];
+        const allRoles = rolesRes?.data?.data || [];
+        const matchedRole = allRoles.find(
+          (role: Role) => role.code === teamRole.role_code,
+        );
+        if (matchedRole) {
+          selectedRoleId = matchedRole.id;
+        }
+      }
+
+      roleForm.setFieldsValue({
+        roleId: selectedRoleId,
+      });
+
+      setRoleModalVisible(true);
+    } catch (error: any) {
+      message.error('获取团队角色失败');
+    }
+  };
+
+  const handleRoleSubmit = async () => {
+    try {
+      const values = await roleForm.validateFields();
+      setLoading(true);
+
+      const selected = teamRoles.find((r) => r.id === values.roleId);
+      if (!selected) {
+        message.error('选择的角色不存在');
+        return;
+      }
+
+      // 获取当前用户信息作为granted_by
+      const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}');
+      const grantedBy = userInfo.id || 'system';
+
+      await request.post(`/api/knowflow/v1/teams/${currentTeam?.id}/roles`, {
+        data: {
+          role_code: selected.code,
+          resource_type: 'system', // 默认为系统级别角色
+          resource_id: null,
+          tenant_id: 'default',
+          granted_by: grantedBy,
+        },
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+      message.success('团队角色配置成功');
+      setRoleModalVisible(false);
+      await loadTeamData();
+    } catch (error: any) {
+      message.error('团队角色配置失败');
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleAddMember = () => {
@@ -223,7 +412,7 @@ const TeamManagementPage = () => {
     } catch (error) {
       console.error('添加成员错误:', error); // 调试日志
       message.error(
-        `添加团队成员失败: ${error.message || JSON.stringify(error)}`,
+        `添加团队成员失败: ${error instanceof Error ? error.message : JSON.stringify(error)}`,
       );
     } finally {
       setMemberLoading(false);
@@ -236,7 +425,7 @@ const TeamManagementPage = () => {
     setMemberLoading(true);
     try {
       await request.delete(
-        `/api/v1/teams/${currentTeam.id}/members/${member.userId}`,
+        `/api/knowflow/v1/teams/${currentTeam.id}/members/${member.userId}`,
       );
       message.success('移除成员成功');
       await loadTeamMembers(currentTeam.id);
@@ -251,11 +440,33 @@ const TeamManagementPage = () => {
   const handleDeleteTeam = async (teamId: string) => {
     setLoading(true);
     try {
-      await request.delete(`/api/v1/teams/${teamId}`);
+      await request.delete(`/api/knowflow/v1/teams/${teamId}`);
       message.success('删除团队成功');
       await loadTeamData();
     } catch (error) {
       message.error('删除团队失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请选择要删除的团队');
+      return;
+    }
+    setLoading(true);
+    try {
+      await Promise.all(
+        selectedRowKeys.map((id) =>
+          request.delete(`/api/knowflow/v1/teams/${id}`),
+        ),
+      );
+      setSelectedRowKeys([]);
+      message.success(`成功删除 ${selectedRowKeys.length} 个团队`);
+      await loadTeamData();
+    } catch (error) {
+      message.error('批量删除失败');
     } finally {
       setLoading(false);
     }
@@ -266,6 +477,7 @@ const TeamManagementPage = () => {
       title: '团队名称',
       dataIndex: 'name',
       key: 'name',
+      width: 150,
       render: (text: string) => (
         <Space>
           <TeamOutlined />
@@ -277,29 +489,49 @@ const TeamManagementPage = () => {
       title: '负责人',
       dataIndex: 'ownerName',
       key: 'ownerName',
+      width: 120,
       render: (text: string) => <Tag color="blue">{text}</Tag>,
     },
     {
       title: '成员数量',
       dataIndex: 'memberCount',
       key: 'memberCount',
+      width: 100,
       render: (count: number) => <Tag color="green">{count}人</Tag>,
     },
     {
       title: '创建时间',
       dataIndex: 'createTime',
       key: 'createTime',
+      width: 150,
     },
     {
       title: '更新时间',
       dataIndex: 'updateTime',
       key: 'updateTime',
+      width: 150,
+    },
+    {
+      title: '角色',
+      key: 'roles',
+      width: 100,
+      render: (_: any, record: TeamData) => {
+        const role =
+          teamRolesMap[record.id] ||
+          ({ id: '', name: '用户', code: 'user', description: '' } as Role);
+
+        const roleConfig = rolePriorityMap[role.code] || {
+          priority: 999,
+          color: '#d9d9d9',
+        };
+        return <Tag color={roleConfig.color}>{role.name || role.code}</Tag>;
+      },
     },
     {
       title: '操作',
       key: 'action',
       fixed: 'right' as const,
-      width: 200,
+      width: 280,
       render: (_: any, record: TeamData) => (
         <Space size="small">
           <Button
@@ -309,6 +541,14 @@ const TeamManagementPage = () => {
             onClick={() => handleManageMembers(record)}
           >
             成员管理
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<SettingOutlined />}
+            onClick={() => handleTeamRoleManagement(record)}
+          >
+            角色配置
           </Button>
           <Popconfirm
             title="确定删除这个团队吗？"
@@ -410,10 +650,30 @@ const TeamManagementPage = () => {
       <Card className={styles.tableCard}>
         <div className={styles.tableHeader}>
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={loadTeamData}>
-              刷新
+            <Button
+              type="primary"
+              icon={<PlusOutlined />}
+              onClick={handleCreateTeam}
+            >
+              新建团队
             </Button>
+            <Popconfirm
+              title={`确定删除选中的 ${selectedRowKeys.length} 个团队吗？`}
+              onConfirm={handleBatchDelete}
+              disabled={selectedRowKeys.length === 0}
+            >
+              <Button
+                danger
+                icon={<DeleteOutlined />}
+                disabled={selectedRowKeys.length === 0}
+              >
+                批量删除
+              </Button>
+            </Popconfirm>
           </Space>
+          <Button icon={<ReloadOutlined />} onClick={loadTeamData}>
+            刷新
+          </Button>
         </div>
 
         <Table
@@ -422,7 +682,7 @@ const TeamManagementPage = () => {
           rowKey="id"
           loading={loading}
           pagination={false}
-          scroll={{ x: 1000 }}
+          scroll={{ x: 970 }}
           rowSelection={{
             selectedRowKeys,
             onChange: (selectedRowKeys: React.Key[]) =>
@@ -539,6 +799,87 @@ const TeamManagementPage = () => {
             <Radio.Group>
               <Radio value="normal">普通成员</Radio>
             </Radio.Group>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 团队角色配置模态框 */}
+      <Modal
+        title={`${currentTeam?.name || ''} - 角色配置`}
+        open={roleModalVisible}
+        onOk={handleRoleSubmit}
+        onCancel={() => setRoleModalVisible(false)}
+        confirmLoading={loading}
+      >
+        <Form form={roleForm} layout="vertical">
+          <Form.Item
+            name="roleId"
+            label="选择角色"
+            rules={[{ required: true, message: '请选择角色' }]}
+          >
+            <Select placeholder="请选择角色" style={{ width: '100%' }}>
+              {teamRoles
+                .filter((role: any) => role.code !== 'super_admin')
+                .map((role: any) => (
+                  <Select.Option key={role.id} value={role.id}>
+                    {role.name} - {role.description}
+                  </Select.Option>
+                ))}
+            </Select>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 新建团队模态框 */}
+      <Modal
+        title="新建团队"
+        open={teamModalVisible}
+        onOk={handleTeamSubmit}
+        onCancel={() => setTeamModalVisible(false)}
+        confirmLoading={loading}
+        destroyOnClose
+        width={500}
+      >
+        <Form form={teamForm} layout="vertical">
+          <Form.Item
+            name="name"
+            label="团队名称"
+            rules={[{ required: true, message: '请输入团队名称' }]}
+          >
+            <Input placeholder="请输入团队名称" />
+          </Form.Item>
+          <Form.Item
+            name="owner_id"
+            label="负责人"
+            rules={[{ required: true, message: '请选择负责人' }]}
+          >
+            {userInfo?.is_superuser ? (
+              <Select
+                placeholder="请选择负责人"
+                showSearch
+                optionFilterProp="children"
+                loading={userList.length === 0}
+              >
+                {userList.map((u) => (
+                  <Option key={u.id} value={u.id}>
+                    {u.username} ({u.email || '无邮箱'})
+                  </Option>
+                ))}
+              </Select>
+            ) : (
+              <Select
+                value={userId}
+                disabled
+                style={{ backgroundColor: '#f5f5f5' }}
+              >
+                <Option value={userId}>
+                  {userInfo?.nickname || '当前管理员'}
+                </Option>
+              </Select>
+            )}
+          </Form.Item>
+          <Form.Item name="description" label="团队描述">
+            <Input.TextArea placeholder="请输入团队描述（可选）" rows={3} />
           </Form.Item>
         </Form>
       </Modal>

@@ -12,7 +12,7 @@ export interface IDocumentInfo {
   parser_config: IParserConfig;
   parser_id: string;
   process_begin_at?: string;
-  process_duation: number;
+  process_duration: number;
   progress: number;
   progress_msg: string;
   run: RunningStatus;
@@ -30,7 +30,7 @@ export interface IDocumentInfo {
 export interface IParserConfig {
   delimiter?: string;
   html4excel?: boolean;
-  layout_recognize?: boolean;
+  layout_recognize?: string;
   pages: any[];
   raptor?: Raptor;
   graphrag?: GraphRag;

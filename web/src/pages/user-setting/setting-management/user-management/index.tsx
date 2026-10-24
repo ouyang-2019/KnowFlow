@@ -7,6 +7,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SearchOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import {
   Button,
@@ -16,8 +17,10 @@ import {
   Modal,
   Pagination,
   Popconfirm,
+  Select,
   Space,
   Table,
+  Tag,
   message,
 } from 'antd';
 import React, { useEffect, useState } from 'react';
@@ -29,6 +32,20 @@ interface UserData {
   email: string;
   createTime: string;
   updateTime: string;
+}
+
+interface Role {
+  id: string;
+  name: string;
+  code: string;
+  description: string;
+}
+
+interface UserRole {
+  id: string;
+  name: string;
+  code: string;
+  description: string;
 }
 
 const UserManagementPage = () => {
@@ -44,12 +61,34 @@ const UserManagementPage = () => {
   const [searchForm] = Form.useForm();
   const [userForm] = Form.useForm();
   const [passwordForm] = Form.useForm();
+  const [roleForm] = Form.useForm();
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: 10,
     total: 0,
   });
+  const [roleModalVisible, setRoleModalVisible] = useState(false);
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [userRoles, setUserRoles] = useState<UserRole[]>([]);
+  const [userRolesMap, setUserRolesMap] = useState<Record<string, UserRole>>(
+    {},
+  );
 
+  // 角色优先级映射
+  const rolePriorityMap: Record<string, { priority: number; color: string }> = {
+    super_admin: { priority: 1, color: '#f50' }, // 超级管理员 - 红色
+    admin: { priority: 2, color: '#722ed1' }, // 管理员 - 紫色
+    editor: { priority: 3, color: '#1890ff' }, // 编辑者 - 蓝色
+    viewer: { priority: 4, color: '#52c41a' }, // 查看者 - 绿色
+    user: { priority: 5, color: '#d9d9d9' }, // 用户 - 灰色
+  };
+
+  // 获取用户角色（每个用户只有一个角色）
+  const getUserRole = (userRolesList: UserRole[]): UserRole | null => {
+    if (!userRolesList || userRolesList.length === 0) return null;
+    // 直接返回第一个角色，因为每个用户只能有一个角色
+    return userRolesList[0];
+  };
   // 模拟用户数据
   // const mockUsers: UserData[] = [
   //   {
@@ -102,7 +141,7 @@ const UserManagementPage = () => {
     setLoading(true);
     try {
       const values = searchForm.getFieldsValue();
-      const res = await request.get('/api/v1/users', {
+      const res = await request.get('/api/knowflow/v1/users', {
         params: {
           currentPage: pagination.current,
           size: pagination.pageSize,
@@ -111,8 +150,45 @@ const UserManagementPage = () => {
         },
       });
       const data = res?.data?.data || {};
-      setUserData(data.list || []);
+      const list = data.list || [];
+      setUserData(list);
       setPagination((prev) => ({ ...prev, total: data.total || 0 }));
+
+      // 使用批量接口获取所有用户的角色
+      const rolesMap: Record<string, UserRole> = {};
+      if (list.length > 0) {
+        try {
+          // 提取用户ID列表
+          const userIds = list.map((u: UserData) => u.id);
+
+          // 调用批量角色查询接口
+          const batchRolesRes = await request.post(
+            '/api/knowflow/v1/rbac/users/batch-roles',
+            {
+              data: {
+                user_ids: userIds,
+                tenant_id: 'default',
+              },
+            },
+          );
+
+          // 处理批量查询结果
+          const userRolesData = batchRolesRes?.data?.user_roles || {};
+
+          // 构建角色映射
+          Object.entries(userRolesData).forEach(([userId, rolesList]) => {
+            const userRole = getUserRole(rolesList as UserRole[]);
+            if (userRole) {
+              rolesMap[userId] = userRole;
+            }
+          });
+        } catch (error) {
+          console.error('批量获取用户角色失败:', error);
+          // 批量接口失败时的降级处理（可选）
+          // 可以选择静默失败，或者回退到单个查询
+        }
+      }
+      setUserRolesMap(rolesMap);
     } catch (error) {
       message.error('加载用户数据失败');
     } finally {
@@ -146,7 +222,7 @@ const UserManagementPage = () => {
   const handleDeleteUser = async (userId: string) => {
     setLoading(true);
     try {
-      await request.delete(`/api/v1/users/${userId}`);
+      await request.delete(`/api/knowflow/v1/users/${userId}`);
       message.success('删除用户成功');
       await loadUserData();
     } catch (error) {
@@ -164,7 +240,9 @@ const UserManagementPage = () => {
     setLoading(true);
     try {
       await Promise.all(
-        selectedRowKeys.map((id) => request.delete(`/api/v1/users/${id}`)),
+        selectedRowKeys.map((id) =>
+          request.delete(`/api/knowflow/v1/users/${id}`),
+        ),
       );
       setSelectedRowKeys([]);
       message.success(`成功删除 ${selectedRowKeys.length} 个用户`);
@@ -182,25 +260,101 @@ const UserManagementPage = () => {
     setResetPasswordModalVisible(true);
   };
 
+  const handleAssignRole = async (user: UserData) => {
+    setEditingUser(user);
+    setCurrentUserId(user.id);
+    try {
+      // 获取可分配的角色（根据当前用户权限过滤）
+      const rolesRes = await request.get(
+        '/api/knowflow/v1/rbac/assignable-roles',
+      );
+      setRoles(rolesRes.data.data || []);
+
+      // 获取用户当前角色（兼容不同返回结构）
+      const userRolesRes = await request.get(
+        `/api/knowflow/v1/rbac/users/${user.id}/roles`,
+      );
+      const rolesList =
+        userRolesRes?.data?.data ?? userRolesRes?.data?.roles ?? [];
+      setUserRoles(rolesList);
+
+      roleForm.setFieldsValue({
+        roleId: (rolesList || []).map((role: any) => role.id)[0],
+      });
+      setRoleModalVisible(true);
+    } catch (error) {
+      message.error('获取角色信息失败');
+    }
+  };
+
+  // 移除查看权限相关逻辑（handleViewPermissions 已删除）
+
+  const handleRoleSubmit = async () => {
+    try {
+      const values = await roleForm.validateFields();
+      setLoading(true);
+
+      // 修复：将选择的角色转换为后端需要的 role_code 字段，并通过 data 提交
+      if (values.roleId) {
+        const selectedRole = roles.find((role) => role.id === values.roleId);
+        if (selectedRole) {
+          await request.post(
+            `/api/knowflow/v1/rbac/users/${currentUserId}/roles`,
+            {
+              data: {
+                role_code: selectedRole.code,
+              },
+            },
+          );
+          message.success('角色分配成功');
+          setRoleModalVisible(false);
+          await loadUserData();
+        } else {
+          message.error('选择的角色不存在');
+        }
+      } else {
+        message.warning('请选择要分配的角色');
+      }
+    } catch (error) {
+      message.error('角色分配失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleUserSubmit = async () => {
     try {
       const values = await userForm.validateFields();
       setLoading(true);
       if (editingUser) {
         if (editingUser.id) {
-          await request.put(`/api/v1/users/${editingUser.id}`, {
-            data: values,
-          });
+          const result = await request.put(
+            `/api/knowflow/v1/users/${editingUser.id}`,
+            {
+              data: values,
+            },
+          );
+          // 由于 getResponse: true，需要检查响应数据
+          if (result?.data?.code === 0) {
+            message.success('更新用户成功');
+            setUserModalVisible(false);
+            await loadUserData();
+          }
         }
-        message.success('更新用户成功');
       } else {
-        await request.post('/api/v1/users', { data: values });
-        message.success('创建用户成功');
+        const result = await request.post('/api/knowflow/v1/users', {
+          data: values,
+        });
+        // 由于 getResponse: true，需要检查响应数据
+        if (result?.data?.code === 0) {
+          message.success('创建用户成功');
+          setUserModalVisible(false);
+          await loadUserData();
+        }
       }
-      setUserModalVisible(false);
-      await loadUserData();
     } catch (error) {
-      message.error('操作失败');
+      // 错误已经由 request 拦截器显示，这里只记录日志
+      console.error('操作失败:', error);
     } finally {
       setLoading(false);
     }
@@ -210,9 +364,12 @@ const UserManagementPage = () => {
     try {
       const values = await passwordForm.validateFields();
       setLoading(true);
-      await request.put(`/api/v1/users/${currentUserId}/reset-password`, {
-        data: { password: values.password },
-      });
+      await request.put(
+        `/api/knowflow/v1/users/${currentUserId}/reset-password`,
+        {
+          data: { password: values.password },
+        },
+      );
       message.success('重置密码成功');
       setResetPasswordModalVisible(false);
     } catch (error) {
@@ -227,29 +384,49 @@ const UserManagementPage = () => {
       title: '用户名',
       dataIndex: 'username',
       key: 'username',
+      width: 120,
     },
     {
       title: '邮箱',
       dataIndex: 'email',
       key: 'email',
+      width: 180,
     },
     {
       title: '创建时间',
       dataIndex: 'createTime',
       key: 'createTime',
+      width: 100,
     },
     {
       title: '更新时间',
       dataIndex: 'updateTime',
       key: 'updateTime',
+      width: 120,
+    },
+    {
+      title: '角色',
+      key: 'roles',
+      width: 100,
+      render: (_: any, record: UserData) => {
+        const role = userRolesMap[record.id];
+        if (role === undefined) return <Tag color="#d9d9d9">用户</Tag>;
+        if (!role) return <Tag color="#d9d9d9">用户</Tag>;
+
+        const roleConfig = rolePriorityMap[role.code] || {
+          priority: 999,
+          color: '#d9d9d9',
+        };
+        return <Tag color={roleConfig.color}>{role.name || role.code}</Tag>;
+      },
     },
     {
       title: '操作',
       key: 'action',
       fixed: 'right' as const,
-      width: 280,
+      width: 320,
       render: (_: any, record: UserData) => (
-        <Space size="small">
+        <Space size={4}>
           <Button
             type="link"
             size="small"
@@ -265,6 +442,14 @@ const UserManagementPage = () => {
             onClick={() => handleResetPassword(record.id)}
           >
             重置密码
+          </Button>
+          <Button
+            type="link"
+            size="small"
+            icon={<UserOutlined />}
+            onClick={() => handleAssignRole(record)}
+          >
+            角色
           </Button>
           <Popconfirm
             title="确定删除这个用户吗？"
@@ -313,7 +498,6 @@ const UserManagementPage = () => {
           </Form.Item>
         </Form>
       </Card>
-
       {/* 操作区域 */}
       <Card className={styles.tableCard}>
         <div className={styles.tableHeader}>
@@ -350,7 +534,7 @@ const UserManagementPage = () => {
           rowKey="id"
           loading={loading}
           pagination={false}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 940 }}
           rowSelection={{
             selectedRowKeys,
             onChange: (selectedRowKeys: React.Key[]) =>
@@ -372,6 +556,32 @@ const UserManagementPage = () => {
           />
         </div>
       </Card>
+      {/* 角色分配模态框 */}
+      <Modal
+        title="分配角色"
+        open={roleModalVisible}
+        onOk={handleRoleSubmit}
+        onCancel={() => setRoleModalVisible(false)}
+        confirmLoading={loading}
+      >
+        <Form form={roleForm} layout="vertical">
+          <Form.Item
+            name="roleId"
+            label="选择角色"
+            rules={[{ required: true, message: '请选择一个角色' }]}
+          >
+            <Select placeholder="请选择角色" style={{ width: '100%' }}>
+              {roles
+                .filter((role: any) => role.code !== 'super_admin')
+                .map((role: any) => (
+                  <Select.Option key={role.id} value={role.id}>
+                    {role.name} - {role.description}
+                  </Select.Option>
+                ))}
+            </Select>
+          </Form.Item>
+        </Form>
+      </Modal>
 
       {/* 用户编辑/创建模态框 */}
       <Modal
@@ -412,7 +622,6 @@ const UserManagementPage = () => {
           )}
         </Form>
       </Modal>
-
       {/* 重置密码模态框 */}
       <Modal
         title="重置密码"
